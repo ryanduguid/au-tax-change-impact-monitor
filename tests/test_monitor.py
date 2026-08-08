@@ -54,6 +54,36 @@ def test_markdown_keeps_limits_visible_and_escapes_source_text() -> None:
     assert "does not establish the legal effect" in markdown
 
 
+def test_markdown_escapes_observed_compilation_metadata() -> None:
+    queue = _queue()
+    source = queue["items"][0]["source"]
+    source["baseline_compilation"]["number"] = "1 | [not a link]"
+    source["observed_compilation"]["number"] = "2`code"
+    source["observed_compilation"]["document_id"] = "C2099C00002`injected"
+    source["evidence_url"] = "https://example.test/C2099A00001`tick"
+
+    markdown = render_markdown(queue)
+
+    assert "1 \\| \\[not a link\\]" in markdown
+    assert "2\\`code" in markdown
+    assert "C2099C00002\\`injected" in markdown
+    assert "https://example.test/C2099A00001\\`tick" in markdown
+
+
+def test_control_characters_in_source_metadata_are_rejected(tmp_path: Path) -> None:
+    payload = json.loads(sample_path("baseline", "sample-sources.json").read_text(encoding="utf-8"))
+    payload["titles"][0]["compilation_number"] = "1\n## Injected heading"
+    bad = tmp_path / "baseline.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="control characters"):
+        compare(
+            baseline_path=bad,
+            observation_path=sample_path("observations", "sample-register-observation.json"),
+            mapping_path=sample_path("mappings", "sample-source-skill-map.json"),
+        )
+
+
 def test_queue_writes_and_human_decision_is_structurally_valid(tmp_path: Path) -> None:
     queue = _queue()
     paths = write_queue(queue, tmp_path / "test-output")

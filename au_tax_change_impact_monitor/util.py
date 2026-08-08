@@ -51,4 +51,4 @@ def load_json_exact(path: Path, required: set[str], *, label: str) -> dict[str, 
 
 
 def safe_markdown(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("|", "\\|").replace("[", "\\[").replace("]", "\\]").replace("\n", " ").replace("\r", " ")
+    return value.replace("\\", "\\\\").replace("`", "\\`").replace("|", "\\|").replace("[", "\\[").replace("]", "\\]").replace("\n", " ").replace("\r", " ")

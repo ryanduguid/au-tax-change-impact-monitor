@@ -41,7 +41,10 @@ class BaselineTitle:
 def _non_empty(value: Any, *, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise MonitorError(f"{field} must be a non-empty string.")
-    return value.strip()
+    text = value.strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise MonitorError(f"{field} must not contain control characters.")
+    return text
 
 
 def _iso_date(value: Any, *, field: str, nullable: bool = False) -> str | None:
@@ -264,12 +267,12 @@ def render_markdown(queue: dict[str, Any]) -> str:
         if source is not None:
             lines += [
                 f"- Source: {safe_markdown(source['title'])} (`{safe_markdown(source['register_id'])}`, {safe_markdown(source['collection'])})",
-                f"- Baseline compilation: {source['baseline_compilation']['number']} dated {source['baseline_compilation']['date']}",
-                f"- Evidence: {source['evidence_url']}",
+                f"- Baseline compilation: {safe_markdown(source['baseline_compilation']['number'])} dated {source['baseline_compilation']['date']}",
+                f"- Evidence: {safe_markdown(source['evidence_url'])}",
             ]
             if source["observed_compilation"]:
                 observed = source["observed_compilation"]
-                lines.append(f"- Observed compilation: {observed['number']} dated {observed['date']} (`{observed['document_id']}`)")
+                lines.append(f"- Observed compilation: {safe_markdown(observed['number'])} dated {observed['date']} (`{safe_markdown(observed['document_id'])}`)")
         lines.append(f"- Mapping status: {item['mapping_status']}")
         for candidate in item["impact_candidates"]:
             lines.append(f"- Review candidate: `{safe_markdown(candidate['skill_ref'])}` — {safe_markdown(candidate['review_question'])}")
