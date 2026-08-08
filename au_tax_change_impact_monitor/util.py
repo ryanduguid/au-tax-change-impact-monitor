@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 from .errors import MonitorError
 
 
-def repository_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+def sample_path(*parts: str) -> Path:
+    """Locate a shipped sample fixture inside the installed package.
+
+    The samples ship as package data, so this resolves correctly for editable
+    checkouts and plain ``pip install`` alike. The package installs as a real
+    directory; zip imports are not supported.
+    """
+    resource = files(__package__)
+    for part in ("samples", *parts):
+        resource = resource.joinpath(part)
+    return Path(str(resource))
 
 
 def sha256_file(path: Path) -> str:
@@ -38,19 +48,6 @@ def load_json_exact(path: Path, required: set[str], *, label: str) -> dict[str, 
     if not isinstance(payload, dict) or set(payload) != required:
         raise MonitorError(f"{label} must contain exactly: {', '.join(sorted(required))}.")
     return payload
-
-
-def path_within(path: Path, parent: Path, *, label: str, require_exists: bool = True) -> Path:
-    root = parent.resolve()
-    try:
-        resolved = path.resolve(strict=require_exists)
-    except FileNotFoundError as exc:
-        raise MonitorError(f"{label} does not exist: {path}.") from exc
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise MonitorError(f"{label} must stay within {root}.") from exc
-    return resolved
 
 
 def safe_markdown(value: str) -> str:

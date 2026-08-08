@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import MonitorError
-from .util import canonical_json, load_json_exact, path_within, repository_root, safe_markdown, sha256_file, sha256_json
+from .util import canonical_json, load_json_exact, safe_markdown, sha256_file, sha256_json
 
 
 OBSERVATION_STATES = {
@@ -163,10 +163,6 @@ def _candidate(mapping: dict[str, str]) -> dict[str, str]:
 
 
 def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) -> dict[str, Any]:
-    root = repository_root()
-    baseline_path = path_within(baseline_path, root / "samples", label="baseline")
-    observation_path = path_within(observation_path, root / "samples", label="observation")
-    mapping_path = path_within(mapping_path, root / "samples", label="source-to-skill map")
     titles, baseline_raw = _load_baseline(baseline_path)
     expected_ids = {title.register_id for title in titles}
     observation = _load_observation(observation_path, expected_ids)
@@ -284,8 +280,6 @@ def render_markdown(queue: dict[str, Any]) -> str:
 
 
 def write_queue(queue: dict[str, Any], output_dir: Path) -> dict[str, Path]:
-    root = repository_root()
-    output_dir = path_within(output_dir, root / "build", label="output directory", require_exists=False)
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "impact-queue.json"
     markdown_path = output_dir / "impact-queue.md"
@@ -295,9 +289,6 @@ def write_queue(queue: dict[str, Any], output_dir: Path) -> dict[str, Path]:
 
 
 def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
-    root = repository_root()
-    queue_path = path_within(queue_path, root / "build", label="impact queue")
-    decision_path = path_within(decision_path, root / "samples", label="technical review decision")
     queue = load_json_exact(queue_path, {"schema_version", "run_id", "mode", "run_status", "baseline", "observation", "items"}, label="impact queue")
     decision = load_json_exact(decision_path, {"schema_version", "run_id", "reviewer_ref", "reviewed_at", "decisions"}, label="technical review decision")
     if queue["schema_version"] != "au-tax-impact-queue.v1" or decision["schema_version"] != "au-tax-technical-review.v1":

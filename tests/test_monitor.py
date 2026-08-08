@@ -7,17 +7,17 @@ import pytest
 
 from au_tax_change_impact_monitor.errors import MonitorError
 from au_tax_change_impact_monitor.monitor import _load_observation, compare, render_markdown, validate_review, write_queue
+from au_tax_change_impact_monitor.util import sample_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLES = ROOT / "samples"
 
 
 def _queue():
     return compare(
-        baseline_path=SAMPLES / "baseline" / "sample-sources.json",
-        observation_path=SAMPLES / "observations" / "sample-register-observation.json",
-        mapping_path=SAMPLES / "mappings" / "sample-source-skill-map.json",
+        baseline_path=sample_path("baseline", "sample-sources.json"),
+        observation_path=sample_path("observations", "sample-register-observation.json"),
+        mapping_path=sample_path("mappings", "sample-source-skill-map.json"),
     )
 
 
@@ -35,7 +35,7 @@ def test_superseded_source_creates_an_open_exactly_mapped_review_item() -> None:
 
 
 def test_complete_observation_rejects_missing_expected_source(tmp_path: Path) -> None:
-    payload = json.loads((SAMPLES / "observations" / "sample-register-observation.json").read_text(encoding="utf-8"))
+    payload = json.loads(sample_path("observations", "sample-register-observation.json").read_text(encoding="utf-8"))
     payload["observations"] = payload["observations"][:1]
     bad = tmp_path / "incomplete.json"
     bad.write_text(json.dumps(payload), encoding="utf-8")
@@ -54,12 +54,12 @@ def test_markdown_keeps_limits_visible_and_escapes_source_text() -> None:
     assert "does not establish the legal effect" in markdown
 
 
-def test_queue_writes_and_human_decision_is_structurally_valid() -> None:
+def test_queue_writes_and_human_decision_is_structurally_valid(tmp_path: Path) -> None:
     queue = _queue()
-    paths = write_queue(queue, ROOT / "build" / "test-output")
+    paths = write_queue(queue, tmp_path / "test-output")
     validation = validate_review(
         queue_path=paths["json"],
-        decision_path=SAMPLES / "decisions" / "sample-technical-review.json",
+        decision_path=sample_path("decisions", "sample-technical-review.json"),
     )
 
     assert validation["status"] == "DECISION_RECORDED"
@@ -68,25 +68,45 @@ def test_queue_writes_and_human_decision_is_structurally_valid() -> None:
 
 def test_unknown_technical_decision_is_rejected(tmp_path: Path) -> None:
     queue = _queue()
-    paths = write_queue(queue, ROOT / "build" / "decision-test")
-    payload = json.loads((SAMPLES / "decisions" / "sample-technical-review.json").read_text(encoding="utf-8"))
+    paths = write_queue(queue, tmp_path / "decision-test")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
     payload["decisions"][0]["decision"] = "AUTO_UPDATE_SKILL"
     bad = tmp_path / "bad-decision.json"
     bad.write_text(json.dumps(payload), encoding="utf-8")
 
-    from au_tax_change_impact_monitor.monitor import load_json_exact
-
-    # The path boundary is part of the public command. This unit test exercises the decision rule directly.
     with pytest.raises(MonitorError, match="allowlisted"):
-        # replace loader inside the module only for the decision fixture, without widening the production path policy
-        import au_tax_change_impact_monitor.monitor as module
+        validate_review(queue_path=paths["json"], decision_path=bad)
 
-        original = module.path_within
-        try:
-            module.path_within = lambda path, parent, **kwargs: bad if path == bad else original(path, parent, **kwargs)
-            validate_review(queue_path=paths["json"], decision_path=bad)
-        finally:
-            module.path_within = original
+
+def test_samples_resolve_from_the_installed_package() -> None:
+    for parts in (
+        ("baseline", "sample-sources.json"),
+        ("observations", "sample-register-observation.json"),
+        ("mappings", "sample-source-skill-map.json"),
+        ("decisions", "sample-technical-review.json"),
+    ):
+        assert sample_path(*parts).is_file()
+
+
+def test_decision_files_are_accepted_from_any_directory(tmp_path: Path) -> None:
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    decision = tmp_path / "a-human-technical-review.json"
+    decision.write_text(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"), encoding="utf-8")
+
+    validation = validate_review(queue_path=paths["json"], decision_path=decision)
+
+    assert validation["status"] == "DECISION_RECORDED"
+
+
+def test_outputs_write_relative_to_the_current_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    queue = _queue()
+
+    paths = write_queue(queue, Path("build") / "relative-out")
+
+    assert (tmp_path / "build" / "relative-out" / "impact-queue.json").is_file()
+    assert paths["markdown"].read_text(encoding="utf-8").startswith("# AU Tax Change Impact Queue")
 
 
 def test_v01_package_has_no_network_client_import() -> None:
