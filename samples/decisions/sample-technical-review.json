@@ -1,0 +1,14 @@
+{
+  "schema_version": "au-tax-technical-review.v1",
+  "run_id": "sha256:2accb440a45063cb02ab7efd0d095feb7edc451d1af075bfbbacbb198018c0fa",
+  "reviewer_ref": "demo-tax-reviewer",
+  "reviewed_at": "2026-08-08T00:00:00Z",
+  "decisions": [
+    {
+      "item_id": "impact:64ea8458e99ade934803959f",
+      "decision": "ESCALATE_TECHNICAL_REVIEW",
+      "rationale": "Synthetic fixture demonstrates a source version change that needs a technical-tax assessment.",
+      "evidence_note": "Reviewed the fabricated Register metadata and direct fixture link."
+    }
+  ]
+}
