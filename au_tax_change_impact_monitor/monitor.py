@@ -72,7 +72,7 @@ def _load_baseline(path: Path) -> tuple[list[BaselineTitle], dict[str, Any]]:
     _iso_date(raw["retrieved"], field="baseline retrieved")
     _https_url(raw["source_api"], field="baseline source_api")
     titles: list[BaselineTitle] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     expected = {"register_id", "name", "collection", "compilation_number", "compilation_date", "version_is_current", "current_version_start", "retrieved", "source_url", "register_page"}
     for index, raw_title in enumerate(raw["titles"], start=1):
         if not isinstance(raw_title, dict) or set(raw_title) != expected:
@@ -90,9 +90,9 @@ def _load_baseline(path: Path) -> tuple[list[BaselineTitle], dict[str, Any]]:
         )
         if not isinstance(title.version_is_current, bool):
             raise MonitorError(f"title {index} version_is_current must be a boolean.")
-        if (title.register_id, title.collection) in seen:
-            raise MonitorError("Baseline source index contains duplicate register_id/collection pairs.")
-        seen.add((title.register_id, title.collection))
+        if title.register_id in seen:
+            raise MonitorError("Baseline source index contains duplicate register IDs.")
+        seen.add(title.register_id)
         titles.append(title)
     if not titles:
         raise MonitorError("Baseline source index has no titles.")

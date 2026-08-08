@@ -54,6 +54,22 @@ def test_markdown_keeps_limits_visible_and_escapes_source_text() -> None:
     assert "does not establish the legal effect" in markdown
 
 
+def test_baseline_reusing_a_register_id_across_collections_is_rejected(tmp_path: Path) -> None:
+    payload = json.loads(sample_path("baseline", "sample-sources.json").read_text(encoding="utf-8"))
+    reused = dict(payload["titles"][0])
+    reused["collection"] = "LegislativeInstrument"
+    payload["titles"].append(reused)
+    bad = tmp_path / "baseline.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="duplicate register IDs"):
+        compare(
+            baseline_path=bad,
+            observation_path=sample_path("observations", "sample-register-observation.json"),
+            mapping_path=sample_path("mappings", "sample-source-skill-map.json"),
+        )
+
+
 def test_markdown_escapes_observed_compilation_metadata() -> None:
     queue = _queue()
     source = queue["items"][0]["source"]
