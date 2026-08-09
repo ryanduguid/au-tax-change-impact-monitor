@@ -110,6 +110,7 @@ def test_queue_writes_and_human_decision_is_structurally_valid(tmp_path: Path) -
 
     assert validation["status"] == "DECISION_RECORDED"
     assert validation["decision_count"] == 1
+    assert validation["mode"] == "synthetic"
 
 
 def test_unknown_technical_decision_is_rejected(tmp_path: Path) -> None:

@@ -336,4 +336,4 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
         _non_empty(item["rationale"], field="technical decision rationale")
         _non_empty(item["evidence_note"], field="technical decision evidence_note")
         seen.add(item_id)
-    return {"schema_version": "au-tax-review-decision-validation.v1", "run_id": queue["run_id"], "status": "DECISION_RECORDED", "decision_count": len(seen), "limitation": "Validation records a structurally complete human decision only; it does not establish legal effect, change a skill, notify anyone, or produce tax advice."}
+    return {"schema_version": "au-tax-review-decision-validation.v1", "run_id": queue["run_id"], "mode": "synthetic", "status": "DECISION_RECORDED", "decision_count": len(seen), "limitation": "Validation records a structurally complete human decision only; it does not establish legal effect, change a skill, notify anyone, or produce tax advice."}
