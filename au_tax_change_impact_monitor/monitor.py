@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from .errors import MonitorError
-from .util import canonical_json, load_json_exact, path_within, repository_root, safe_markdown, sha256_file, sha256_json
+from .util import canonical_json, load_json_exact, safe_markdown, sha256_file, sha256_json
 
 
 OBSERVATION_STATES = {
@@ -41,7 +41,10 @@ class BaselineTitle:
 def _non_empty(value: Any, *, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise MonitorError(f"{field} must be a non-empty string.")
-    return value.strip()
+    text = value.strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise MonitorError(f"{field} must not contain control characters.")
+    return text
 
 
 def _iso_date(value: Any, *, field: str, nullable: bool = False) -> str | None:
@@ -52,6 +55,18 @@ def _iso_date(value: Any, *, field: str, nullable: bool = False) -> str | None:
         date.fromisoformat(text)
     except ValueError as exc:
         raise MonitorError(f"{field} must be an ISO date.") from exc
+    return text
+
+
+def _iso_timestamp(value: Any, *, field: str) -> str:
+    text = _non_empty(value, field=field)
+    # datetime.fromisoformat only accepts a trailing Z from Python 3.11;
+    # normalise it so the supported 3.10 floor parses the same values.
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise MonitorError(f"{field} must be an ISO 8601 timestamp.") from exc
     return text
 
 
@@ -69,7 +84,7 @@ def _load_baseline(path: Path) -> tuple[list[BaselineTitle], dict[str, Any]]:
     _iso_date(raw["retrieved"], field="baseline retrieved")
     _https_url(raw["source_api"], field="baseline source_api")
     titles: list[BaselineTitle] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     expected = {"register_id", "name", "collection", "compilation_number", "compilation_date", "version_is_current", "current_version_start", "retrieved", "source_url", "register_page"}
     for index, raw_title in enumerate(raw["titles"], start=1):
         if not isinstance(raw_title, dict) or set(raw_title) != expected:
@@ -87,9 +102,9 @@ def _load_baseline(path: Path) -> tuple[list[BaselineTitle], dict[str, Any]]:
         )
         if not isinstance(title.version_is_current, bool):
             raise MonitorError(f"title {index} version_is_current must be a boolean.")
-        if (title.register_id, title.collection) in seen:
-            raise MonitorError("Baseline source index contains duplicate register_id/collection pairs.")
-        seen.add((title.register_id, title.collection))
+        if title.register_id in seen:
+            raise MonitorError("Baseline source index contains duplicate register IDs.")
+        seen.add(title.register_id)
         titles.append(title)
     if not titles:
         raise MonitorError("Baseline source index has no titles.")
@@ -101,7 +116,9 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
     if raw["schema_version"] != "au-tax-register-observation.v1" or raw["mode"] != "synthetic":
         raise MonitorError("Only au-tax-register-observation.v1 in synthetic mode is supported.")
     _non_empty(raw["observed_at"], field="observed_at")
-    if not isinstance(raw["expected_register_ids"], list) or set(raw["expected_register_ids"]) != expected_ids:
+    if not isinstance(raw["expected_register_ids"], list) or not all(isinstance(item, str) for item in raw["expected_register_ids"]):
+        raise MonitorError("Observation expected_register_ids must be a list of strings.")
+    if set(raw["expected_register_ids"]) != expected_ids:
         raise MonitorError("Observation expected_register_ids must exactly match the baseline scope.")
     if not isinstance(raw["complete"], bool) or not isinstance(raw["observations"], list):
         raise MonitorError("Observation complete/observations fields are invalid.")
@@ -115,7 +132,9 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
             raise MonitorError("Observation contains duplicate register IDs.")
         seen.add(register_id)
         _non_empty(item["collection"], field=f"observation {index} collection")
-        if item["state"] not in OBSERVATION_STATES:
+        # isinstance first: an unhashable value such as a list would raise
+        # TypeError from the set-membership test instead of a clean error.
+        if not isinstance(item["state"], str) or item["state"] not in OBSERVATION_STATES:
             raise MonitorError(f"Observation {index} has an unsupported state.")
         _https_url(item["evidence_url"], field=f"observation {index} evidence_url")
         _non_empty(item["checked_at"], field=f"observation {index} checked_at")
@@ -163,10 +182,6 @@ def _candidate(mapping: dict[str, str]) -> dict[str, str]:
 
 
 def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) -> dict[str, Any]:
-    root = repository_root()
-    baseline_path = path_within(baseline_path, root / "samples", label="baseline")
-    observation_path = path_within(observation_path, root / "samples", label="observation")
-    mapping_path = path_within(mapping_path, root / "samples", label="source-to-skill map")
     titles, baseline_raw = _load_baseline(baseline_path)
     expected_ids = {title.register_id for title in titles}
     observation = _load_observation(observation_path, expected_ids)
@@ -268,12 +283,12 @@ def render_markdown(queue: dict[str, Any]) -> str:
         if source is not None:
             lines += [
                 f"- Source: {safe_markdown(source['title'])} (`{safe_markdown(source['register_id'])}`, {safe_markdown(source['collection'])})",
-                f"- Baseline compilation: {source['baseline_compilation']['number']} dated {source['baseline_compilation']['date']}",
-                f"- Evidence: {source['evidence_url']}",
+                f"- Baseline compilation: {safe_markdown(source['baseline_compilation']['number'])} dated {source['baseline_compilation']['date']}",
+                f"- Evidence: {safe_markdown(source['evidence_url'])}",
             ]
             if source["observed_compilation"]:
                 observed = source["observed_compilation"]
-                lines.append(f"- Observed compilation: {observed['number']} dated {observed['date']} (`{observed['document_id']}`)")
+                lines.append(f"- Observed compilation: {safe_markdown(observed['number'])} dated {observed['date']} (`{safe_markdown(observed['document_id'])}`)")
         lines.append(f"- Mapping status: {item['mapping_status']}")
         for candidate in item["impact_candidates"]:
             lines.append(f"- Review candidate: `{safe_markdown(candidate['skill_ref'])}` — {safe_markdown(candidate['review_question'])}")
@@ -284,8 +299,6 @@ def render_markdown(queue: dict[str, Any]) -> str:
 
 
 def write_queue(queue: dict[str, Any], output_dir: Path) -> dict[str, Path]:
-    root = repository_root()
-    output_dir = path_within(output_dir, root / "build", label="output directory", require_exists=False)
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "impact-queue.json"
     markdown_path = output_dir / "impact-queue.md"
@@ -295,27 +308,36 @@ def write_queue(queue: dict[str, Any], output_dir: Path) -> dict[str, Path]:
 
 
 def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
-    root = repository_root()
-    queue_path = path_within(queue_path, root / "build", label="impact queue")
-    decision_path = path_within(decision_path, root / "samples", label="technical review decision")
     queue = load_json_exact(queue_path, {"schema_version", "run_id", "mode", "run_status", "baseline", "observation", "items"}, label="impact queue")
     decision = load_json_exact(decision_path, {"schema_version", "run_id", "reviewer_ref", "reviewed_at", "decisions"}, label="technical review decision")
     if queue["schema_version"] != "au-tax-impact-queue.v1" or decision["schema_version"] != "au-tax-technical-review.v1":
         raise MonitorError("Queue or decision schema version is unsupported.")
     if queue["run_id"] != decision["run_id"]:
         raise MonitorError("Technical review decision must refer to the exact queue run_id.")
-    open_items = {item["item_id"] for item in queue["items"] if item["state"] == "OPEN"}
+    _non_empty(decision["reviewer_ref"], field="technical review reviewer_ref")
+    _iso_timestamp(decision["reviewed_at"], field="technical review reviewed_at")
+    if not isinstance(queue["items"], list):
+        raise MonitorError("Impact queue items must be a list.")
+    open_items: set[str] = set()
+    for index, item in enumerate(queue["items"], start=1):
+        if not isinstance(item, dict) or "item_id" not in item or "state" not in item:
+            raise MonitorError(f"Impact queue item {index} has an invalid shape.")
+        if item["state"] == "OPEN":
+            open_items.add(_non_empty(item["item_id"], field=f"impact queue item {index} item_id"))
     if not isinstance(decision["decisions"], list) or not decision["decisions"]:
         raise MonitorError("Technical review decision must include at least one decision.")
     seen: set[str] = set()
     for item in decision["decisions"]:
         if not isinstance(item, dict) or set(item) != {"item_id", "decision", "rationale", "evidence_note"}:
             raise MonitorError("Each technical decision must contain exactly item_id, decision, rationale, and evidence_note.")
-        if item["item_id"] not in open_items or item["item_id"] in seen:
+        item_id = _non_empty(item["item_id"], field="technical decision item_id")
+        if item_id not in open_items or item_id in seen:
             raise MonitorError("Technical decision references an unknown, blocked, or duplicate item.")
-        if item["decision"] not in ALLOWED_DECISIONS:
+        # isinstance first: an unhashable value such as a list would raise
+        # TypeError from the set-membership test instead of a clean error.
+        if not isinstance(item["decision"], str) or item["decision"] not in ALLOWED_DECISIONS:
             raise MonitorError("Technical decision is not allowlisted.")
         _non_empty(item["rationale"], field="technical decision rationale")
         _non_empty(item["evidence_note"], field="technical decision evidence_note")
-        seen.add(item["item_id"])
-    return {"schema_version": "au-tax-review-decision-validation.v1", "run_id": queue["run_id"], "status": "DECISION_RECORDED", "decision_count": len(seen), "limitation": "Validation records a structurally complete human decision only; it does not establish legal effect, change a skill, notify anyone, or produce tax advice."}
+        seen.add(item_id)
+    return {"schema_version": "au-tax-review-decision-validation.v1", "run_id": queue["run_id"], "mode": "synthetic", "status": "DECISION_RECORDED", "decision_count": len(seen), "limitation": "Validation records a structurally complete human decision only; it does not establish legal effect, change a skill, notify anyone, or produce tax advice."}
