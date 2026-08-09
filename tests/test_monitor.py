@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from au_tax_change_impact_monitor.errors import MonitorError
-from au_tax_change_impact_monitor.monitor import _load_observation, compare, render_markdown, validate_review, write_queue
+from au_tax_change_impact_monitor.monitor import _iso_timestamp, _load_observation, compare, render_markdown, validate_review, write_queue
 from au_tax_change_impact_monitor.util import sample_path
 
 
@@ -122,6 +122,37 @@ def test_unknown_technical_decision_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(MonitorError, match="allowlisted"):
         validate_review(queue_path=paths["json"], decision_path=bad)
+
+
+def test_review_with_blank_reviewer_ref_is_rejected(tmp_path: Path) -> None:
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    payload["reviewer_ref"] = "   "
+    bad = tmp_path / "decision.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="reviewer_ref"):
+        validate_review(queue_path=paths["json"], decision_path=bad)
+
+
+def test_review_with_a_non_timestamp_reviewed_at_is_rejected(tmp_path: Path) -> None:
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    payload["reviewed_at"] = "last tuesday"
+    bad = tmp_path / "decision.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="ISO 8601 timestamp"):
+        validate_review(queue_path=paths["json"], decision_path=bad)
+
+
+def test_reviewed_at_accepts_utc_z_and_explicit_offsets() -> None:
+    # The shipped sample uses a trailing Z, which datetime.fromisoformat only
+    # accepts natively from Python 3.11; the helper must normalise it on 3.10.
+    assert _iso_timestamp("2026-08-08T00:00:00Z", field="reviewed_at") == "2026-08-08T00:00:00Z"
+    assert _iso_timestamp("2026-08-08T10:00:00+10:00", field="reviewed_at") == "2026-08-08T10:00:00+10:00"
 
 
 def test_samples_resolve_from_the_installed_package() -> None:

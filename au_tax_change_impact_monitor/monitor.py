@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,18 @@ def _iso_date(value: Any, *, field: str, nullable: bool = False) -> str | None:
         date.fromisoformat(text)
     except ValueError as exc:
         raise MonitorError(f"{field} must be an ISO date.") from exc
+    return text
+
+
+def _iso_timestamp(value: Any, *, field: str) -> str:
+    text = _non_empty(value, field=field)
+    # datetime.fromisoformat only accepts a trailing Z from Python 3.11;
+    # normalise it so the supported 3.10 floor parses the same values.
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise MonitorError(f"{field} must be an ISO 8601 timestamp.") from exc
     return text
 
 
@@ -298,6 +310,8 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
         raise MonitorError("Queue or decision schema version is unsupported.")
     if queue["run_id"] != decision["run_id"]:
         raise MonitorError("Technical review decision must refer to the exact queue run_id.")
+    _non_empty(decision["reviewer_ref"], field="technical review reviewer_ref")
+    _iso_timestamp(decision["reviewed_at"], field="technical review reviewed_at")
     open_items = {item["item_id"] for item in queue["items"] if item["state"] == "OPEN"}
     if not isinstance(decision["decisions"], list) or not decision["decisions"]:
         raise MonitorError("Technical review decision must include at least one decision.")
