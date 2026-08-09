@@ -7,7 +7,6 @@ from pathlib import Path
 
 from .errors import MonitorError
 from .monitor import compare, validate_review, write_queue
-from .util import path_within, repository_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser = commands.add_parser("validate-review", help="validate a human technical-review decision")
     review_parser.add_argument("--queue", required=True, type=Path)
     review_parser.add_argument("--decision", required=True, type=Path)
-    review_parser.add_argument("--out", type=Path, help="optional validation JSON below build/")
+    review_parser.add_argument("--out", type=Path, help="optional path for the validation JSON")
     return parser
 
 
@@ -37,9 +36,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if queue["run_status"] != "BLOCKED" else 2
         validation = validate_review(queue_path=args.queue, decision_path=args.decision)
         if args.out:
-            output = path_within(args.out, repository_root() / "build", label="validation output", require_exists=False)
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"au-tax-change-impact-monitor: {validation['status']}; {validation['decision_count']} decision(s)")
         return 0
     except MonitorError as exc:
