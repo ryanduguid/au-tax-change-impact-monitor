@@ -132,7 +132,9 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
             raise MonitorError("Observation contains duplicate register IDs.")
         seen.add(register_id)
         _non_empty(item["collection"], field=f"observation {index} collection")
-        if item["state"] not in OBSERVATION_STATES:
+        # isinstance first: an unhashable value such as a list would raise
+        # TypeError from the set-membership test instead of a clean error.
+        if not isinstance(item["state"], str) or item["state"] not in OBSERVATION_STATES:
             raise MonitorError(f"Observation {index} has an unsupported state.")
         _https_url(item["evidence_url"], field=f"observation {index} evidence_url")
         _non_empty(item["checked_at"], field=f"observation {index} checked_at")
@@ -331,7 +333,9 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
         item_id = _non_empty(item["item_id"], field="technical decision item_id")
         if item_id not in open_items or item_id in seen:
             raise MonitorError("Technical decision references an unknown, blocked, or duplicate item.")
-        if item["decision"] not in ALLOWED_DECISIONS:
+        # isinstance first: an unhashable value such as a list would raise
+        # TypeError from the set-membership test instead of a clean error.
+        if not isinstance(item["decision"], str) or item["decision"] not in ALLOWED_DECISIONS:
             raise MonitorError("Technical decision is not allowlisted.")
         _non_empty(item["rationale"], field="technical decision rationale")
         _non_empty(item["evidence_note"], field="technical decision evidence_note")
