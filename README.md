@@ -41,7 +41,7 @@ au-tax-change-impact-monitor validate-review \
   --decision path/to/a-human-technical-review.json
 ```
 
-Only `AWAIT_PRIMARY_TEXT`, `NO_WORKFLOW_CHANGE`, `UPDATE_CANDIDATE`, and `ESCALATE_TECHNICAL_REVIEW` are accepted. Validation checks the decision structure and matching queue only; it does not certify the review, edit a skill, or establish a legal conclusion.
+Only `AWAIT_PRIMARY_TEXT`, `NO_WORKFLOW_CHANGE`, `UPDATE_CANDIDATE`, and `ESCALATE_TECHNICAL_REVIEW` are accepted. Validation reports `PARTIAL_DECISION_RECORDED` while any open item remains undecided; it checks structure and matching queue only and does not certify the review, edit a skill, or establish a legal conclusion. Observation and review timestamps require an explicit UTC offset (or `Z`) so audit ordering is unambiguous.
 
 ## Strict scope
 

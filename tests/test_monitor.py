@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from au_tax_change_impact_monitor.errors import MonitorError
-from au_tax_change_impact_monitor.monitor import _iso_timestamp, _load_observation, compare, render_markdown, validate_review, write_queue
+from au_tax_change_impact_monitor.monitor import _https_url, _iso_timestamp, _load_observation, compare, render_markdown, validate_review, write_queue
 from au_tax_change_impact_monitor.util import sample_path
 
 
@@ -156,6 +156,54 @@ def test_reviewed_at_accepts_utc_z_and_explicit_offsets() -> None:
     assert _iso_timestamp("2026-08-08T10:00:00+10:00", field="reviewed_at") == "2026-08-08T10:00:00+10:00"
 
 
+@pytest.mark.parametrize("value", ["2026-08-08", "2026-08-08T10:00:00"])
+def test_timestamps_require_an_explicit_timezone(value: str) -> None:
+    with pytest.raises(MonitorError, match="explicit UTC offset"):
+        _iso_timestamp(value, field="reviewed_at")
+
+
+def test_partial_technical_review_remains_explicit(tmp_path: Path) -> None:
+    queue = _queue()
+    second = dict(queue["items"][0])
+    second["item_id"] = "impact:second-open-item"
+    queue["items"].append(second)
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(json.dumps(queue), encoding="utf-8")
+
+    validation = validate_review(
+        queue_path=queue_path,
+        decision_path=sample_path("decisions", "sample-technical-review.json"),
+    )
+
+    assert validation["status"] == "PARTIAL_DECISION_RECORDED"
+    assert validation["undecided_count"] == 1
+
+
+def test_observation_rejects_duplicate_expected_ids(tmp_path: Path) -> None:
+    payload = json.loads(sample_path("observations", "sample-register-observation.json").read_text(encoding="utf-8"))
+    payload["expected_register_ids"].append(payload["expected_register_ids"][0])
+    bad = tmp_path / "observation.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="must not contain duplicates"):
+        _load_observation(bad, set(payload["expected_register_ids"]))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://[malformed",
+        "https://example.test:not-a-port/path",
+        "https://example.test:65536/path",
+        "https://exa mple.test/path",
+        "https://example.test\\@other.test/path",
+    ],
+)
+def test_https_urls_fail_with_a_domain_error_for_malformed_authorities(value: str) -> None:
+    with pytest.raises(MonitorError, match="must be an https URL"):
+        _https_url(value, field="evidence_url")
+
+
 def test_observation_register_ids_with_non_string_entries_fail_cleanly(tmp_path: Path) -> None:
     payload = json.loads(sample_path("observations", "sample-register-observation.json").read_text(encoding="utf-8"))
     payload["expected_register_ids"] = [["C2099A00001"], "F2099L00001"]
@@ -245,5 +293,6 @@ def test_outputs_write_relative_to_the_current_directory(tmp_path: Path, monkeyp
 
 def test_v01_package_has_no_network_client_import() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "au_tax_change_impact_monitor").glob("*.py"))
-    for forbidden in ("requests", "urllib", "http.client", "socket", "mcp"):
+    # urllib.parse is a pure URL parser; reject modules that can perform I/O.
+    for forbidden in ("requests", "urllib.request", "http.client", "socket", "mcp"):
         assert forbidden not in source

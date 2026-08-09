@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import MonitorError
-from .util import canonical_json, load_json_exact, safe_markdown, sha256_file, sha256_json
+from .util import load_json_exact, safe_markdown, sha256_file, sha256_json
 
 
 OBSERVATION_STATES = {
@@ -64,15 +65,30 @@ def _iso_timestamp(value: Any, *, field: str) -> str:
     # normalise it so the supported 3.10 floor parses the same values.
     normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
-        datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
         raise MonitorError(f"{field} must be an ISO 8601 timestamp.") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise MonitorError(f"{field} must include an explicit UTC offset or Z.")
     return text
 
 
 def _https_url(value: Any, *, field: str) -> str:
     text = _non_empty(value, field=field)
-    if not text.startswith("https://"):
+    try:
+        parsed = urlsplit(text)
+        hostname = parsed.hostname
+        _ = parsed.port  # Force validation of a supplied port.
+    except ValueError as exc:
+        raise MonitorError(f"{field} must be an https URL.") from exc
+    invalid_authority = (
+        not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or "\\" in parsed.netloc
+        or any(character.isspace() for character in parsed.netloc)
+    )
+    if parsed.scheme.lower() != "https" or invalid_authority:
         raise MonitorError(f"{field} must be an https URL.")
     return text
 
@@ -115,10 +131,13 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
     raw = load_json_exact(path, {"schema_version", "mode", "observed_at", "expected_register_ids", "complete", "observations"}, label="Register observation")
     if raw["schema_version"] != "au-tax-register-observation.v1" or raw["mode"] != "synthetic":
         raise MonitorError("Only au-tax-register-observation.v1 in synthetic mode is supported.")
-    _non_empty(raw["observed_at"], field="observed_at")
+    _iso_timestamp(raw["observed_at"], field="observed_at")
     if not isinstance(raw["expected_register_ids"], list) or not all(isinstance(item, str) for item in raw["expected_register_ids"]):
         raise MonitorError("Observation expected_register_ids must be a list of strings.")
-    if set(raw["expected_register_ids"]) != expected_ids:
+    cleaned_expected = [_non_empty(item, field="expected_register_ids item") for item in raw["expected_register_ids"]]
+    if len(cleaned_expected) != len(set(cleaned_expected)):
+        raise MonitorError("Observation expected_register_ids must not contain duplicates.")
+    if set(cleaned_expected) != expected_ids:
         raise MonitorError("Observation expected_register_ids must exactly match the baseline scope.")
     if not isinstance(raw["complete"], bool) or not isinstance(raw["observations"], list):
         raise MonitorError("Observation complete/observations fields are invalid.")
@@ -137,7 +156,7 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
         if not isinstance(item["state"], str) or item["state"] not in OBSERVATION_STATES:
             raise MonitorError(f"Observation {index} has an unsupported state.")
         _https_url(item["evidence_url"], field=f"observation {index} evidence_url")
-        _non_empty(item["checked_at"], field=f"observation {index} checked_at")
+        _iso_timestamp(item["checked_at"], field=f"observation {index} checked_at")
         if item["state"] == "SUPERSEDED":
             for field in ("observed_compilation_number", "observed_compilation_date", "observed_register_document_id"):
                 _non_empty(item[field], field=f"observation {index} {field}")
@@ -340,4 +359,6 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
         _non_empty(item["rationale"], field="technical decision rationale")
         _non_empty(item["evidence_note"], field="technical decision evidence_note")
         seen.add(item_id)
-    return {"schema_version": "au-tax-review-decision-validation.v1", "run_id": queue["run_id"], "mode": "synthetic", "status": "DECISION_RECORDED", "decision_count": len(seen), "limitation": "Validation records a structurally complete human decision only; it does not establish legal effect, change a skill, notify anyone, or produce tax advice."}
+    undecided_count = len(open_items - seen)
+    status = "DECISION_RECORDED" if undecided_count == 0 else "PARTIAL_DECISION_RECORDED"
+    return {"schema_version": "au-tax-review-decision-validation.v1", "run_id": queue["run_id"], "mode": "synthetic", "status": status, "decision_count": len(seen), "undecided_count": undecided_count, "limitation": "Validation records structurally valid human decisions only; it does not establish legal effect, change a skill, notify anyone, or produce tax advice."}
