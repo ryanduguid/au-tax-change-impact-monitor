@@ -166,6 +166,30 @@ def test_observation_register_ids_with_non_string_entries_fail_cleanly(tmp_path:
         _load_observation(bad, {"C2099A00001", "F2099L00001"})
 
 
+def test_observation_with_a_list_valued_state_is_rejected_cleanly(tmp_path: Path) -> None:
+    # An unhashable state would raise TypeError from the set-membership test
+    # instead of the clean MonitorError exit.
+    payload = json.loads(sample_path("observations", "sample-register-observation.json").read_text(encoding="utf-8"))
+    payload["observations"][0]["state"] = ["SUPERSEDED"]
+    bad = tmp_path / "observation.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="unsupported state"):
+        _load_observation(bad, set(payload["expected_register_ids"]))
+
+
+def test_decision_with_a_list_valued_decision_is_rejected_cleanly(tmp_path: Path) -> None:
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    payload["decisions"][0]["decision"] = ["adopt"]
+    bad = tmp_path / "decision.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="not allowlisted"):
+        validate_review(queue_path=paths["json"], decision_path=bad)
+
+
 def test_queue_with_non_dict_items_is_rejected_without_a_traceback(tmp_path: Path) -> None:
     queue = _queue()
     queue["items"] = ["not-an-item"]
