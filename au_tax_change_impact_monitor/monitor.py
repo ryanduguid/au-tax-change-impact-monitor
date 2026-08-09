@@ -116,7 +116,9 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
     if raw["schema_version"] != "au-tax-register-observation.v1" or raw["mode"] != "synthetic":
         raise MonitorError("Only au-tax-register-observation.v1 in synthetic mode is supported.")
     _non_empty(raw["observed_at"], field="observed_at")
-    if not isinstance(raw["expected_register_ids"], list) or set(raw["expected_register_ids"]) != expected_ids:
+    if not isinstance(raw["expected_register_ids"], list) or not all(isinstance(item, str) for item in raw["expected_register_ids"]):
+        raise MonitorError("Observation expected_register_ids must be a list of strings.")
+    if set(raw["expected_register_ids"]) != expected_ids:
         raise MonitorError("Observation expected_register_ids must exactly match the baseline scope.")
     if not isinstance(raw["complete"], bool) or not isinstance(raw["observations"], list):
         raise MonitorError("Observation complete/observations fields are invalid.")
@@ -312,18 +314,26 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
         raise MonitorError("Technical review decision must refer to the exact queue run_id.")
     _non_empty(decision["reviewer_ref"], field="technical review reviewer_ref")
     _iso_timestamp(decision["reviewed_at"], field="technical review reviewed_at")
-    open_items = {item["item_id"] for item in queue["items"] if item["state"] == "OPEN"}
+    if not isinstance(queue["items"], list):
+        raise MonitorError("Impact queue items must be a list.")
+    open_items: set[str] = set()
+    for index, item in enumerate(queue["items"], start=1):
+        if not isinstance(item, dict) or "item_id" not in item or "state" not in item:
+            raise MonitorError(f"Impact queue item {index} has an invalid shape.")
+        if item["state"] == "OPEN":
+            open_items.add(_non_empty(item["item_id"], field=f"impact queue item {index} item_id"))
     if not isinstance(decision["decisions"], list) or not decision["decisions"]:
         raise MonitorError("Technical review decision must include at least one decision.")
     seen: set[str] = set()
     for item in decision["decisions"]:
         if not isinstance(item, dict) or set(item) != {"item_id", "decision", "rationale", "evidence_note"}:
             raise MonitorError("Each technical decision must contain exactly item_id, decision, rationale, and evidence_note.")
-        if item["item_id"] not in open_items or item["item_id"] in seen:
+        item_id = _non_empty(item["item_id"], field="technical decision item_id")
+        if item_id not in open_items or item_id in seen:
             raise MonitorError("Technical decision references an unknown, blocked, or duplicate item.")
         if item["decision"] not in ALLOWED_DECISIONS:
             raise MonitorError("Technical decision is not allowlisted.")
         _non_empty(item["rationale"], field="technical decision rationale")
         _non_empty(item["evidence_note"], field="technical decision evidence_note")
-        seen.add(item["item_id"])
+        seen.add(item_id)
     return {"schema_version": "au-tax-review-decision-validation.v1", "run_id": queue["run_id"], "status": "DECISION_RECORDED", "decision_count": len(seen), "limitation": "Validation records a structurally complete human decision only; it does not establish legal effect, change a skill, notify anyone, or produce tax advice."}

@@ -155,6 +155,38 @@ def test_reviewed_at_accepts_utc_z_and_explicit_offsets() -> None:
     assert _iso_timestamp("2026-08-08T10:00:00+10:00", field="reviewed_at") == "2026-08-08T10:00:00+10:00"
 
 
+def test_observation_register_ids_with_non_string_entries_fail_cleanly(tmp_path: Path) -> None:
+    payload = json.loads(sample_path("observations", "sample-register-observation.json").read_text(encoding="utf-8"))
+    payload["expected_register_ids"] = [["C2099A00001"], "F2099L00001"]
+    bad = tmp_path / "observation.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="list of strings"):
+        _load_observation(bad, {"C2099A00001", "F2099L00001"})
+
+
+def test_queue_with_non_dict_items_is_rejected_without_a_traceback(tmp_path: Path) -> None:
+    queue = _queue()
+    queue["items"] = ["not-an-item"]
+    bad = tmp_path / "queue.json"
+    bad.write_text(json.dumps(queue), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="invalid shape"):
+        validate_review(queue_path=bad, decision_path=sample_path("decisions", "sample-technical-review.json"))
+
+
+def test_decision_with_a_non_string_item_id_is_rejected(tmp_path: Path) -> None:
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    payload["decisions"][0]["item_id"] = ["impact:64ea8458e99ade934803959f"]
+    bad = tmp_path / "decision.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="non-empty string"):
+        validate_review(queue_path=paths["json"], decision_path=bad)
+
+
 def test_samples_resolve_from_the_installed_package() -> None:
     for parts in (
         ("baseline", "sample-sources.json"),
