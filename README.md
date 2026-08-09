@@ -62,4 +62,6 @@ pytest
 python -m build
 ```
 
+Built with AI assistance (Claude); design, review, and testing by the author.
+
 MIT licensed.
