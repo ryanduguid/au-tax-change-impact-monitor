@@ -213,6 +213,33 @@ def test_a_current_title_with_no_compilation_cannot_carry_a_document_id(tmp_path
         _compare_fixtures(tmp_path, observation=observation)
 
 
+def test_a_live_observation_cannot_be_compared(tmp_path: Path) -> None:
+    """The observation-side twin of the queue-side synthetic-mode gate.
+
+    README rests "Every artefact carries `mode: synthetic`" on both of them,
+    and only the queue side was pinned. Without this one a live Register
+    observation flows straight through compare() into a queue that then stamps
+    itself `mode: synthetic`, which is the misrepresentation the rule exists to
+    prevent.
+    """
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["mode"] = "live"
+
+    with pytest.raises(MonitorError, match="synthetic mode"):
+        _compare_fixtures(tmp_path, observation=observation)
+
+
+def test_an_observation_item_must_carry_a_real_checked_at_timestamp(tmp_path: Path) -> None:
+    # The twin of observed_at, upgraded from _non_empty in the same hunk and
+    # left unpinned. checked_at is the per-title provenance stamp; a free-text
+    # value reaches the queue and cannot order anything.
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["observations"][0]["checked_at"] = "last tuesday"
+
+    with pytest.raises(MonitorError, match="ISO 8601 timestamp"):
+        _compare_fixtures(tmp_path, observation=observation)
+
+
 def test_a_failed_lookup_must_name_its_error_category(tmp_path: Path) -> None:
     observation = _payload("observations", "sample-register-observation.json")
     entry = _clear_compilation(observation["observations"][0])
@@ -228,6 +255,36 @@ def test_a_map_reusing_a_mapping_id_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(MonitorError, match="duplicate mapping IDs"):
         _compare_fixtures(tmp_path, mapping=mapping)
+
+
+def test_an_input_that_is_not_utf8_is_blocked_not_a_traceback(tmp_path: Path) -> None:
+    # A file the loader cannot decode is an ordinary condition, not a crash.
+    # Without the UnicodeDecodeError clause the raw exception escapes main()
+    # and the CLI prints a traceback carrying the local path layout.
+    bad = tmp_path / "baseline.json"
+    bad.write_bytes(b'{"source": "\xff\xfe not utf-8"}')
+
+    with pytest.raises(MonitorError, match="could not be read as UTF-8"):
+        compare(
+            baseline_path=bad,
+            observation_path=sample_path("observations", "sample-register-observation.json"),
+            mapping_path=sample_path("mappings", "sample-source-skill-map.json"),
+        )
+
+
+def test_an_input_path_that_is_a_directory_is_blocked_not_a_traceback(tmp_path: Path) -> None:
+    # The OSError half of the same clause: a directory where a file belongs
+    # raises IsADirectoryError on POSIX and PermissionError on Windows, and
+    # neither is FileNotFoundError, so only the OSError catch stops it.
+    bad = tmp_path / "baseline-directory"
+    bad.mkdir()
+
+    with pytest.raises(MonitorError, match="could not be read as UTF-8"):
+        compare(
+            baseline_path=bad,
+            observation_path=sample_path("observations", "sample-register-observation.json"),
+            mapping_path=sample_path("mappings", "sample-source-skill-map.json"),
+        )
 
 
 def test_a_baseline_with_no_titles_is_rejected(tmp_path: Path) -> None:
@@ -558,6 +615,19 @@ def test_https_urls_fail_with_a_domain_error_for_malformed_authorities(value: st
         _https_url(value, field="evidence_url")
 
 
+@pytest.mark.parametrize("value", ["http://example.test/x", "ftp://example.test/x"])
+def test_a_scheme_other_than_https_is_refused(value: str) -> None:
+    """The authority checks above are pinned; the scheme check was not.
+
+    Every evidence_url, source_url and register_page in a queue is a link a
+    reviewer is expected to follow. Both of these carry a well-formed
+    authority, so with the scheme test dropped nothing else in _https_url
+    objects and a cleartext citation ships in the artefact.
+    """
+    with pytest.raises(MonitorError, match="must be an https URL"):
+        _https_url(value, field="evidence_url")
+
+
 def test_observation_register_ids_with_non_string_entries_fail_cleanly(tmp_path: Path) -> None:
     payload = json.loads(sample_path("observations", "sample-register-observation.json").read_text(encoding="utf-8"))
     payload["expected_register_ids"] = [["C2099A00001"], "F2099L00001"]
@@ -605,6 +675,67 @@ def test_non_synthetic_queue_cannot_be_validated(tmp_path: Path) -> None:
 
     with pytest.raises(MonitorError, match="Only synthetic impact queues"):
         validate_review(queue_path=bad, decision_path=sample_path("decisions", "sample-technical-review.json"))
+
+
+def test_a_decision_for_a_different_run_cannot_be_recorded(tmp_path: Path) -> None:
+    """The one line binding a human sign-off to the run it signs off.
+
+    Without it any decision file validates against any later queue, and the
+    validation artefact records a sign-off nobody made for that run - which is
+    the whole provenance claim this tool exists to make.
+    """
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    payload["run_id"] = "sha256:deadbeef"
+    bad = tmp_path / "decision.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="exact queue run_id"):
+        validate_review(queue_path=paths["json"], decision_path=bad)
+
+
+def test_a_blocked_item_cannot_be_signed_off(tmp_path: Path) -> None:
+    # A BLOCKED item is one the tool could not assess at all. Recording a
+    # technical decision against it would close a question that was never put.
+    queue = _queue()
+    queue["items"][0]["state"] = "BLOCKED"
+    queue["run_status"] = "BLOCKED"
+    bad = tmp_path / "blocked-queue.json"
+    bad.write_text(json.dumps(queue), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="unknown, blocked, or duplicate"):
+        validate_review(queue_path=bad, decision_path=sample_path("decisions", "sample-technical-review.json"))
+
+
+def test_a_decision_naming_an_item_outside_the_queue_is_rejected(tmp_path: Path) -> None:
+    # The other half of the same condition: an item_id the queue never carried
+    # would otherwise count toward the decided set and drive undecided_count to
+    # zero, turning PARTIAL_DECISION_RECORDED into DECISION_RECORDED.
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    payload["decisions"][0]["item_id"] = "impact:never-in-this-queue"
+    bad = tmp_path / "decision.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="unknown, blocked, or duplicate"):
+        validate_review(queue_path=paths["json"], decision_path=bad)
+
+
+def test_two_decisions_for_one_item_are_rejected(tmp_path: Path) -> None:
+    # The last half of the same condition. Two decisions for one item is either
+    # a duplicated file or a reviewer changing their mind in place; neither can
+    # be recorded as one decision, and decision_count would count it twice.
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    payload["decisions"].append(dict(payload["decisions"][0]))
+    bad = tmp_path / "decision.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="unknown, blocked, or duplicate"):
+        validate_review(queue_path=paths["json"], decision_path=bad)
 
 
 def test_queue_with_duplicate_item_ids_is_rejected(tmp_path: Path) -> None:

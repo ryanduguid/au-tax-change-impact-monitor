@@ -50,6 +50,17 @@ def test_readme_describes_both_rejection_shapes_not_one() -> None:
     assert "rejected by argparse" in readme
 
 
+def test_readme_states_that_an_unwritable_stdout_keeps_the_run_exit_status() -> None:
+    # The exit-code table above says 0 or 2 and nothing else. A stdout that
+    # cannot be written is the one way that promise used to break - the
+    # interpreter's exit-time flush replaced the status with 120 - so the
+    # README has to say what happens now instead. tests/test_cli.py pins the
+    # behaviour; this pins the sentence.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "the exit status is still the one the run decided" in readme
+
+
 def test_readme_states_the_pinned_timestamp_grammar() -> None:
     # The grammar is narrower than datetime.fromisoformat's on every supported
     # interpreter, so a user with a stored artefact needs it written down.
