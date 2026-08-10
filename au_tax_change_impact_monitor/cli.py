@@ -55,6 +55,57 @@ def _say(line: str) -> None:
         )
 
 
+def _abandon_stdout(exc: OSError) -> None:
+    """Stop using a stdout that cannot be written, without changing the exit status.
+
+    Closing it is the whole point. CPython flushes sys.stdout once more while
+    shutting down and, when that flush fails, reports "Exception ignored in:
+    <_io.TextIOWrapper name='<stdout>'>" and exits 120 - replacing the status
+    this run already decided, after both queue files have been written
+    correctly. It skips a sys.stdout that is already closed, and close() closes
+    the stream even when its own flush raises the same error again.
+
+    Nothing else is disturbed: stderr keeps carrying the note, and an ordinary
+    run never reaches here.
+    """
+    try:
+        sys.stdout.close()
+    except OSError:
+        # close() flushes first, so it raises the failure that brought us here
+        # a second time. The stream ends up closed either way, which is all
+        # this needs.
+        pass
+    try:
+        print(
+            f"au-tax-change-impact-monitor: note: the run summary could not be written to stdout ({exc}); "
+            f"the exit status still reflects the run and the files on disk are complete.",
+            file=sys.stderr,
+        )
+    except OSError:
+        # Both streams are gone. There is nowhere left to say so, and the exit
+        # status must still be the run's.
+        pass
+
+
+def _report(lines: list[str], code: int) -> int:
+    """Print the run summary and settle stdout, returning `code` either way.
+
+    A redirected stdout is block-buffered, so a reader that closed the pipe is
+    invisible to print(): the bytes sit in the buffer and the write only fails
+    when the interpreter flushes on the way out, long after this returns.
+    Flushing here moves that failure inside the run, where the exit status is
+    still ours to set. The summary is a convenience; the queue files are the
+    output, and they are already on disk.
+    """
+    try:
+        for line in lines:
+            _say(line)
+        sys.stdout.flush()
+    except OSError as exc:
+        _abandon_stdout(exc)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -62,16 +113,15 @@ def main(argv: list[str] | None = None) -> int:
             queue = compare(baseline_path=args.baseline, observation_path=args.observation, mapping_path=args.map)
             # Scoped to the output write alone. Everything upstream of it turns
             # its own OSErrors into MonitorError, and an OSError raised anywhere
-            # else - a BrokenPipeError from the prints below, say - is not a
-            # path problem and must not be labelled as one.
+            # else - a closed stdout under _report, say - is not a path problem
+            # and must not be labelled as one.
             try:
                 paths = write_queue(queue, args.out)
             except OSError as exc:
                 return _blocked(f"the output directory could not be written: {exc}")
-            _say(f"au-tax-change-impact-monitor: {queue['run_status']}; {len(queue['items'])} item(s)")
-            for name, path in paths.items():
-                _say(f"  {name}: {path}")
-            return 0 if queue["run_status"] != "BLOCKED" else 2
+            summary = [f"au-tax-change-impact-monitor: {queue['run_status']}; {len(queue['items'])} item(s)"]
+            summary += [f"  {name}: {path}" for name, path in paths.items()]
+            return _report(summary, 0 if queue["run_status"] != "BLOCKED" else 2)
         validation = validate_review(queue_path=args.queue, decision_path=args.decision)
         if args.out:
             try:
@@ -79,8 +129,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.out.write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             except OSError as exc:
                 return _blocked(f"the validation output file could not be written: {exc}")
-        _say(f"au-tax-change-impact-monitor: {validation['status']}; {validation['decision_count']} decision(s)")
-        return 0
+        return _report([f"au-tax-change-impact-monitor: {validation['status']}; {validation['decision_count']} decision(s)"], 0)
     except MonitorError as exc:
         return _blocked(str(exc))
 

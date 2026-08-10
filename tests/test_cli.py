@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -127,13 +129,21 @@ def test_validate_review_out_colliding_with_a_directory_is_blocked(tmp_path: Pat
     assert "blocked: the validation output file could not be written:" in capsys.readouterr().err
 
 
-def test_an_oserror_that_is_not_a_path_problem_is_not_labelled_as_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_oserror_that_is_not_a_path_problem_is_not_labelled_as_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A BrokenPipeError from the summary print is not a bad --out path.
 
     The first version of the exit-code fix wrapped the whole command body in
     one `except OSError`, so any OSError raised after the files were written -
     a closed pipe on stdout, most obviously - was reported as "a file path
     could not be used" and exited 2 on a run whose output was complete.
+
+    The second version scoped that handler to the output write and left the
+    closed pipe raising out of main(), so the console script printed a
+    traceback and exited 1 instead. The summary is a convenience; the queue
+    files are the output, so a run that produced them completely keeps its own
+    exit status and stderr says the summary was lost.
     """
     class _ClosedPipe(io.TextIOBase):
         def write(self, text: str) -> int:
@@ -142,7 +152,65 @@ def test_an_oserror_that_is_not_a_path_problem_is_not_labelled_as_one(tmp_path: 
     output = tmp_path / "queue"
     monkeypatch.setattr(sys, "stdout", _ClosedPipe())
 
-    with pytest.raises(BrokenPipeError):
-        main(_compare_argv(output))
+    assert main(_compare_argv(output)) == 0
 
     assert (output / "impact-queue.json").is_file()
+    captured = capsys.readouterr().err
+    assert "note: the run summary could not be written to stdout" in captured
+    assert "blocked:" not in captured
+
+
+def test_a_stdout_that_fails_only_at_the_shutdown_flush_keeps_the_exit_status(tmp_path: Path) -> None:
+    """The process must exit 0, not 120, on a complete run with an unwritable stdout.
+
+    A redirected stdout is block-buffered, so print() succeeds into the buffer
+    and the write only fails when the interpreter flushes sys.stdout while
+    shutting down - after main() has returned its status. CPython reports that
+    as "Exception ignored in: <_io.TextIOWrapper name='<stdout>'>" and exits
+    120, so a scheduler keying off the exit status discards a run whose queue
+    files are complete on disk. Nothing in-process can observe that, so this
+    case runs a real interpreter.
+
+    stdout here is a file opened for reading. It fails exactly the way a closed
+    pipe does, with no dependence on when a reader happens to let go.
+    """
+    output = tmp_path / "unwritable-stdout"
+    read_only = tmp_path / "read-only-stdout.txt"
+    read_only.write_bytes(b"")
+
+    with read_only.open("rb") as handle:
+        done = subprocess.run(
+            [sys.executable, "-m", "au_tax_change_impact_monitor", *_compare_argv(output)],
+            stdout=handle,
+            stderr=subprocess.PIPE,
+        )
+
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+    assert (output / "impact-queue.json").is_file()
+    assert b"note: the run summary could not be written to stdout" in done.stderr
+
+
+def test_a_blocked_run_exits_2_with_the_queue_still_written(tmp_path: Path) -> None:
+    """README promises 0 for REVIEW_REQUIRED and NO_CHANGE_DETECTED, 2 for BLOCKED.
+
+    The queue is written either way, so the exit status is the only thing that
+    tells a caller the run reached no usable conclusion. Without this case the
+    whole conditional collapses to `return 0` with a green suite.
+    """
+    observation = json.loads(sample_path("observations", "sample-register-observation.json").read_text(encoding="utf-8"))
+    observation["complete"] = False
+    observation_path = tmp_path / "incomplete-observation.json"
+    observation_path.write_text(json.dumps(observation), encoding="utf-8")
+    output = tmp_path / "blocked-run"
+
+    code = main([
+        "compare",
+        "--baseline", str(sample_path("baseline", "sample-sources.json")),
+        "--observation", str(observation_path),
+        "--map", str(sample_path("mappings", "sample-source-skill-map.json")),
+        "--out", str(output),
+    ])
+
+    assert code == 2
+    queue = json.loads((output / "impact-queue.json").read_text(encoding="utf-8"))
+    assert queue["run_status"] == "BLOCKED"
