@@ -47,6 +47,8 @@ The output directory contains deterministic `impact-queue.json` and `impact-queu
 
 If stdout cannot encode a character in the `--out` path (a redirected stream on Windows uses the ANSI code page, not UTF-8), that one line is printed backslash-escaped and a `au-tax-change-impact-monitor: note: ...` line on stderr says so. The exit status still reflects the run, and the files on disk carry the real path.
 
+If stdout cannot be written at all — a reader that closed the pipe, or a redirect to a handle this process cannot write to — the summary is dropped, a `au-tax-change-impact-monitor: note: ...` line on stderr says so, and the exit status is still the one the run decided. A redirected stdout is buffered, so that failure otherwise surfaces only when the interpreter flushes on the way out, where it is reported as `Exception ignored ...` and exits 120 on a run whose queue files are complete. The CLI closes stdout instead, which is what keeps the exit status the run's own.
+
 ```bash
 au-tax-change-impact-monitor validate-review \
   --queue build/demo/impact-queue.json \
