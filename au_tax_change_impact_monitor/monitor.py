@@ -96,11 +96,15 @@ def _parse_timestamp(text: str, *, field: str) -> datetime:
     TIMESTAMP_PATTERN first, then parsing with strptime, keeps the accepted set
     identical on every supported version.
 
-    The pattern is deliberately no wider than the narrowest supported
-    interpreter: everything it accepts, 3.10 accepted too. It is narrower in
-    one respect that no version distinguished - fromisoformat took any single
-    character as the date/time separator, and only "T", "t" and a space are
-    accepted here. README documents the resulting grammar.
+    The point of the pattern is that the accepted set is FIXED, not that it
+    matches any one interpreter. It is not a subset of 3.10: a fractional
+    second of 1 to 6 digits is accepted here, where 3.10 took only 3 or 6. It
+    is narrower than 3.11+ in three respects - the basic and week forms and a
+    bare-hour offset are refused, a fraction longer than 6 digits is refused,
+    and only "T", "t" and a space are taken as the date/time separator where
+    fromisoformat took any single character. What matters for an artefact is
+    that none of those answers change with the interpreter running the check.
+    README documents the resulting grammar.
     """
     match = TIMESTAMP_PATTERN.fullmatch(text)
     if match is None:

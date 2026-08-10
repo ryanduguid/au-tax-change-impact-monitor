@@ -424,7 +424,6 @@ def test_a_date_alone_is_never_a_timestamp_however_it_is_qualified(value: str) -
         "20260808T000000Z",        # ISO basic form
         "2026-W32-6T00:00:00Z",    # week date
         "2026-08-08T00:00:00+00",  # bare-hour offset
-        "2026-08-08T00:00:00z",    # lowercase zulu
     ],
 )
 def test_timestamp_grammar_does_not_depend_on_the_interpreter(value: str) -> None:
@@ -439,9 +438,21 @@ def test_timestamp_grammar_does_not_depend_on_the_interpreter(value: str) -> Non
         _iso_timestamp(value, field="observed_at")
 
 
+def test_a_lowercase_zulu_offset_is_refused_on_every_interpreter() -> None:
+    """Not an interpreter divergence: no supported version accepts this.
+
+    datetime.fromisoformat rejects "...00:00:00z" on 3.10, 3.11, 3.12 and 3.13
+    alike - only an uppercase "Z" is normalised - so refusing it removes no
+    divergence and simply keeps the documented grammar. It is pinned here
+    rather than alongside the 3.11-only forms so the distinction stays honest.
+    """
+    with pytest.raises(MonitorError, match="ISO 8601 timestamp"):
+        _iso_timestamp("2026-08-08T00:00:00z", field="observed_at")
+
+
 @pytest.mark.parametrize("value", ["2026-08-08X00:00:00Z", "2026-08-08/00:00:00Z"])
 def test_a_separator_outside_the_documented_grammar_is_refused(value: str) -> None:
-    """Unlike the cases above, these parsed on 3.10 and 3.12 alike.
+    """Unlike the 3.11-only forms above, these parsed on 3.10 and 3.12 alike.
 
     fromisoformat took any single character as the date/time separator, so
     refusing them narrows the accepted set on every supported interpreter
@@ -487,7 +498,10 @@ def test_an_observation_stamped_with_a_date_and_an_offset_is_rejected_end_to_end
 
 def test_validate_review_parses_both_timestamps_with_the_pinned_grammar(tmp_path: Path) -> None:
     # A one-digit fractional second is accepted by fromisoformat on 3.11+ and
-    # rejected on 3.10, in both the queue and the decision file.
+    # rejected on 3.10. The pinned pattern accepts 1 to 6 digits on every
+    # supported version, so this is a case where the pattern is deliberately
+    # WIDER than 3.10 rather than narrower: the answer stops moving with the
+    # interpreter, which is the property that matters for a stored artefact.
     queue = _queue()
     queue["observation"]["observed_at"] = "2026-08-08T00:00:00.000000Z"
     queue_path = tmp_path / "queue.json"
