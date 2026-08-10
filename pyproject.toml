@@ -27,6 +27,7 @@ au-tax-change-impact-monitor = "au_tax_change_impact_monitor.cli:main"
 
 [tool.setuptools]
 packages = ["au_tax_change_impact_monitor"]
+include-package-data = false
 
 [tool.setuptools.package-data]
 au_tax_change_impact_monitor = ["samples/*/*.json"]
