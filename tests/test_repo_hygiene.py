@@ -39,6 +39,26 @@ def test_readme_names_every_blocked_change_kind() -> None:
         assert change_kind in readme, f"README does not document {change_kind}"
 
 
+def test_readme_describes_both_rejection_shapes_not_one() -> None:
+    # argparse rejects a malformed command line itself, exit 2 with a usage
+    # block and no "blocked:" line, so the README must not promise that prefix
+    # for every rejected input. tests/test_cli.py pins the behaviour; this pins
+    # the sentence that describes it.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "Every rejected input also exits 2" not in readme
+    assert "rejected by argparse" in readme
+
+
+def test_readme_states_the_pinned_timestamp_grammar() -> None:
+    # The grammar is narrower than datetime.fromisoformat's on every supported
+    # interpreter, so a user with a stored artefact needs it written down.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "YYYY-MM-DDThh:mm:ss[.ffffff][Z|+hh:mm|-hh:mm]" in readme
+    assert "or a single space allowed in place of `T`" in readme
+
+
 def test_ci_keeps_the_pytest_summary_line_visible() -> None:
     # pyproject already sets addopts = "-q". A second -q on the CI command line
     # makes it -qq, which drops the pass/fail count: a test file that stops

@@ -43,7 +43,9 @@ The output directory contains deterministic `impact-queue.json` and `impact-queu
 | `CURRENT_NO_PUBLISHED_COMPILATION` | The title is current but has no published compilation to compare. |
 | `BASELINE_NOT_CURRENT` | The baseline row is itself marked `version_is_current: false`, so it is a stale index entry and cannot support a currency conclusion. |
 
-`compare` exits 0 for `REVIEW_REQUIRED` and `NO_CHANGE_DETECTED`, and 2 when the run status is `BLOCKED`. Every rejected input also exits 2 with a single `au-tax-change-impact-monitor: blocked: ...` line on stderr.
+`compare` exits 0 for `REVIEW_REQUIRED` and `NO_CHANGE_DETECTED`, and 2 when the run status is `BLOCKED`. Rejected input also exits 2, in one of two shapes: a malformed command line is rejected by argparse, which prints its own usage block, and everything the monitor itself rejects prints a single `au-tax-change-impact-monitor: blocked: ...` line on stderr.
+
+If stdout cannot encode a character in the `--out` path (a redirected stream on Windows uses the ANSI code page, not UTF-8), that one line is printed backslash-escaped and a `au-tax-change-impact-monitor: note: ...` line on stderr says so. The exit status still reflects the run, and the files on disk carry the real path.
 
 ```bash
 au-tax-change-impact-monitor validate-review \
@@ -52,6 +54,8 @@ au-tax-change-impact-monitor validate-review \
 ```
 
 Only `AWAIT_PRIMARY_TEXT`, `NO_WORKFLOW_CHANGE`, `UPDATE_CANDIDATE`, and `ESCALATE_TECHNICAL_REVIEW` are accepted. Validation reports `PARTIAL_DECISION_RECORDED` while any open item remains undecided; it checks structure and matching queue only and does not certify the review, edit a skill, or establish a legal conclusion. Observation and review timestamps require an explicit UTC offset (or `Z`) so audit ordering is unambiguous.
+
+The accepted timestamp grammar is exactly `YYYY-MM-DDThh:mm:ss[.ffffff][Z|+hh:mm|-hh:mm]`, with `t` or a single space allowed in place of `T`. It is pinned by a pattern rather than handed to `datetime.fromisoformat`, whose grammar differs between Python 3.10 and 3.11+, so the same stored artefact validates the same way on every supported interpreter. The ISO basic form (`20260808T000000Z`), week and ordinal dates, a bare-hour offset (`+00`), a lowercase `z`, a date with no clock, and any other date/time separator are all refused. Dates in the baseline and observation are `YYYY-MM-DD` on the same basis.
 
 ## Strict scope
 

@@ -397,27 +397,58 @@ def test_reviewed_at_accepts_utc_z_and_explicit_offsets() -> None:
     assert _iso_timestamp("2026-08-08T10:00:00+10:00", field="reviewed_at") == "2026-08-08T10:00:00+10:00"
 
 
-@pytest.mark.parametrize("value", ["2026-08-08", "2026-08-08T10:00:00"])
+@pytest.mark.parametrize("value", ["2026-08-08T10:00:00", "2026-08-08 10:00:00", "2026-08-08T10:00:00.123456"])
 def test_timestamps_require_an_explicit_timezone(value: str) -> None:
     with pytest.raises(MonitorError, match="explicit UTC offset"):
         _iso_timestamp(value, field="reviewed_at")
 
 
+@pytest.mark.parametrize("value", ["2026-08-08", "2026-08-08Z", "2026-08-08+10:00", "2026-08-08-05:00"])
+def test_a_date_alone_is_never_a_timestamp_however_it_is_qualified(value: str) -> None:
+    """The clock is mandatory, and an offset does not substitute for one.
+
+    A date-only value silently means midnight, so accepting one would let a
+    review recorded earlier the same day as the observation pass the "cannot
+    predate the observation" check. The first pattern written for this grammar
+    made the clock and the offset independently optional, which accepted the
+    last three values here - none of which any supported interpreter accepted
+    before the pattern existed.
+    """
+    with pytest.raises(MonitorError, match="ISO 8601 timestamp"):
+        _iso_timestamp(value, field="observed_at")
+
+
 @pytest.mark.parametrize(
     "value",
     [
-        "20260808T000000Z",       # ISO basic form
-        "2026-W32-6T00:00:00Z",   # week date
+        "20260808T000000Z",        # ISO basic form
+        "2026-W32-6T00:00:00Z",    # week date
         "2026-08-08T00:00:00+00",  # bare-hour offset
-        "2026-08-08X00:00:00Z",   # arbitrary date/time separator
+        "2026-08-08T00:00:00z",    # lowercase zulu
     ],
 )
 def test_timestamp_grammar_does_not_depend_on_the_interpreter(value: str) -> None:
-    """These parse on Python 3.11+ and raise on the declared 3.10 floor.
+    """Each of these parses on Python 3.11+ and raises on the declared 3.10 floor.
 
-    datetime.fromisoformat decides the answer, so without an explicit pattern
-    a queue written on one supported interpreter cannot be re-validated on
-    another - which is the whole point of a replayable provenance artefact.
+    Verified against origin/main's fromisoformat-based helper on 3.10.20 and
+    3.12.10. datetime.fromisoformat decides the answer, so without an explicit
+    pattern a queue written on one supported interpreter cannot be re-validated
+    on another - which is the whole point of a replayable provenance artefact.
+    """
+    with pytest.raises(MonitorError, match="ISO 8601 timestamp"):
+        _iso_timestamp(value, field="observed_at")
+
+
+@pytest.mark.parametrize("value", ["2026-08-08X00:00:00Z", "2026-08-08/00:00:00Z"])
+def test_a_separator_outside_the_documented_grammar_is_refused(value: str) -> None:
+    """Unlike the cases above, these parsed on 3.10 and 3.12 alike.
+
+    fromisoformat took any single character as the date/time separator, so
+    refusing them narrows the accepted set on every supported interpreter
+    rather than removing a divergence. That is a deliberate choice, kept
+    because neither ISO 8601 nor RFC 3339 admits an arbitrary separator, and
+    README states the resulting grammar. "T", "t" and a space are still
+    accepted, so an artefact stored under the old helper stays valid.
     """
     with pytest.raises(MonitorError, match="ISO 8601 timestamp"):
         _iso_timestamp(value, field="observed_at")
@@ -429,9 +460,29 @@ def test_iso_dates_reject_the_forms_only_newer_interpreters_accept(value: str) -
         _iso_date(value, field="compilation_date")
 
 
-@pytest.mark.parametrize("value", ["2026-08-08T00:00:00Z", "2026-08-08T00:00:00.5Z", "2026-08-08T00:00:00.123456+10:00"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-08-08T00:00:00Z",
+        "2026-08-08T00:00:00.5Z",
+        "2026-08-08T00:00:00.123456+10:00",
+        "2026-08-08 00:00:00+00:00",  # space separator, accepted on 3.10 and 3.12 before the pattern
+        "2026-08-08t00:00:00Z",       # lowercase t, likewise
+    ],
+)
 def test_the_accepted_timestamp_forms_are_the_same_on_every_supported_version(value: str) -> None:
     assert _iso_timestamp(value, field="observed_at") == value
+
+
+def test_an_observation_stamped_with_a_date_and_an_offset_is_rejected_end_to_end(tmp_path: Path) -> None:
+    # The unit case above, through the public entry point: with the clock
+    # optional this reached the queue as observed_at "2026-08-08+10:00" and
+    # compare() returned REVIEW_REQUIRED on it.
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["observed_at"] = "2026-08-08+10:00"
+
+    with pytest.raises(MonitorError, match="ISO 8601 timestamp"):
+        _compare_fixtures(tmp_path, observation=observation)
 
 
 def test_validate_review_parses_both_timestamps_with_the_pinned_grammar(tmp_path: Path) -> None:

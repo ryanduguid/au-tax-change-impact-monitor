@@ -29,8 +29,18 @@ ALLOWED_DECISIONS = {
 # extended forms only: no basic form, no week or ordinal dates, no bare-hour
 # offset. See _parse_timestamp for why the grammar is pinned here.
 DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
+# The clock is mandatory: a timestamp orders an audit trail, and a date alone
+# would silently mean midnight. An offset carried by a date alone does not make
+# it one, so "2026-08-08+10:00" is rejected here rather than reaching the
+# tzinfo check below and passing it.
 TIMESTAMP_PATTERN = re.compile(
-    r"(?P<stamp>\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)?)"
+    r"(?P<date>\d{4}-\d{2}-\d{2})"
+    # "T", "t" and a space are the separators datetime.fromisoformat accepted
+    # on every version this package supports, so an artefact already stored
+    # with one stays valid. Any other separator is refused.
+    r"[Tt ]"
+    r"(?P<clock>\d{2}:\d{2}:\d{2})"
+    r"(?P<fraction>\.\d{1,6})?"
     r"(?P<offset>Z|[+-]\d{2}:\d{2})?"
 )
 
@@ -78,22 +88,29 @@ def _parse_timestamp(text: str, *, field: str) -> datetime:
     """Parse the one timestamp grammar this package accepts.
 
     datetime.fromisoformat widened its grammar in Python 3.11: the basic form
-    ("20260808T000000Z"), week dates and a bare-hour offset ("+00") all parse
-    there and raise on 3.10, which is inside this package's declared
-    requires-python range and inside its own CI matrix. Delegating to it would
-    make an artefact valid or invalid according to whichever interpreter the
-    next reviewer happens to run. Matching TIMESTAMP_PATTERN first, then
-    parsing with strptime, keeps the accepted set identical on every supported
-    version.
+    ("20260808T000000Z"), week dates, a bare-hour offset ("+00") and a
+    lowercase "z" all parse there and raise on 3.10, which is inside this
+    package's declared requires-python range and inside its own CI matrix.
+    Delegating to it would make an artefact valid or invalid according to
+    whichever interpreter the next reviewer happens to run. Matching
+    TIMESTAMP_PATTERN first, then parsing with strptime, keeps the accepted set
+    identical on every supported version.
+
+    The pattern is deliberately no wider than the narrowest supported
+    interpreter: everything it accepts, 3.10 accepted too. It is narrower in
+    one respect that no version distinguished - fromisoformat took any single
+    character as the date/time separator, and only "T", "t" and a space are
+    accepted here. README documents the resulting grammar.
     """
     match = TIMESTAMP_PATTERN.fullmatch(text)
     if match is None:
         raise MonitorError(f"{field} must be an ISO 8601 timestamp.")
-    stamp = match.group("stamp")
-    offset = match.group("offset")
-    fmt = "%Y-%m-%dT%H:%M:%S" if "T" in stamp else "%Y-%m-%d"
-    if "." in stamp:
+    stamp = f"{match['date']}T{match['clock']}"
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    if match["fraction"] is not None:
+        stamp += match["fraction"]
         fmt += ".%f"
+    offset = match["offset"]
     if offset is not None:
         # strptime's %z takes an extended offset; Z is not one of its forms.
         stamp += "+00:00" if offset == "Z" else offset
