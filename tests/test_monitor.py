@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -251,6 +252,23 @@ def test_observation_with_a_list_valued_state_is_rejected_cleanly(tmp_path: Path
         _load_observation(bad, set(payload["expected_register_ids"]))
 
 
+def test_queue_item_with_a_list_valued_state_is_rejected_cleanly(tmp_path: Path) -> None:
+    # Same trap as the observation loader: an unhashable state raises
+    # TypeError from the set-membership test instead of MonitorError.
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(paths["json"].read_text(encoding="utf-8"))
+    payload["items"][0]["state"] = ["OPEN"]
+    bad = tmp_path / "bad-queue.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="unsupported state"):
+        validate_review(
+            queue_path=bad,
+            decision_path=sample_path("decisions", "sample-technical-review.json"),
+        )
+
+
 def test_non_synthetic_queue_cannot_be_validated(tmp_path: Path) -> None:
     queue = _queue()
     queue["mode"] = "live"
@@ -347,7 +365,56 @@ def test_outputs_write_relative_to_the_current_directory(tmp_path: Path, monkeyp
 
 
 def test_v01_package_has_no_network_client_import() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "au_tax_change_impact_monitor").glob("*.py"))
-    # urllib.parse is a pure URL parser; reject modules that can perform I/O.
-    for forbidden in ("requests", "urllib.request", "http.client", "socket", "mcp"):
+    """Walk the AST rather than scanning text.
+
+    A substring scan for "urllib.request" is blind to `from urllib import
+    request`, so the package could hold a working network client while the
+    assertion passed.
+    """
+    forbidden_roots = {
+        "aiohttp",
+        "asyncio",
+        "ftplib",
+        "http",
+        "httpx",
+        "mcp",
+        "requests",
+        "smtplib",
+        "socket",
+        "ssl",
+        "telnetlib",
+        "urllib3",
+        "webbrowser",
+    }
+    allowed_urllib = {"urllib.parse"}
+
+    for path in sorted((ROOT / "au_tax_change_impact_monitor").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:  # relative import, inside this package
+                    continue
+                base = node.module or ""
+                imported = [f"{base}.{alias.name}" if base else alias.name for alias in node.names]
+            else:
+                continue
+            for name in imported:
+                root = name.split(".")[0]
+                assert root not in forbidden_roots, f"{path.name} imports {name}"
+                if root == "urllib":
+                    assert name in allowed_urllib or name.startswith("urllib.parse."), (
+                        f"{path.name} imports {name}"
+                    )
+                if root == "importlib":
+                    # importlib.resources reads packaged sample data;
+                    # importlib.import_module would load anything by name.
+                    assert name.startswith("importlib.resources"), f"{path.name} imports {name}"
+
+    # Second net: dynamic import by name would sidestep the walk above.
+    source = "\n".join(
+        path.read_text(encoding="utf-8") for path in (ROOT / "au_tax_change_impact_monitor").glob("*.py")
+    )
+    for forbidden in ("__import__", "import_module"):
         assert forbidden not in source
