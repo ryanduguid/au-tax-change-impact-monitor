@@ -361,7 +361,9 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
         if item_id in queue_item_ids:
             raise MonitorError("Impact queue contains duplicate item IDs.")
         queue_item_ids.add(item_id)
-        if item["state"] not in {"OPEN", "BLOCKED"}:
+        # isinstance first: an unhashable value such as a list would raise
+        # TypeError from the set membership test instead of MonitorError.
+        if not isinstance(item["state"], str) or item["state"] not in {"OPEN", "BLOCKED"}:
             raise MonitorError(f"Impact queue item {index} has an unsupported state.")
         if item["state"] == "OPEN":
             open_items.add(item_id)
