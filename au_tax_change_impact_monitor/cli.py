@@ -24,8 +24,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _relax_stdout_encoding() -> None:
+    """Stop an unprintable output path from failing a run that succeeded.
+
+    A redirected (non-console) stdout on Windows defaults to the ANSI code
+    page with errors='strict', so printing an --out path holding a macron
+    vowel, Cyrillic or CJK character raised UnicodeEncodeError and exited 1
+    after both queue files had already been written correctly. stderr already
+    defaults to backslashreplace; stdout does not.
+    """
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(errors="backslashreplace")
+    except (OSError, ValueError):  # pragma: no cover - detached or closed stream
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _relax_stdout_encoding()
     try:
         if args.command == "compare":
             queue = compare(baseline_path=args.baseline, observation_path=args.observation, mapping_path=args.map)
@@ -42,6 +61,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except MonitorError as exc:
         print(f"au-tax-change-impact-monitor: blocked: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # Output paths are not checked before use, so pointing --out at an
+        # existing file, or at a read-only location, reached mkdir/write_text
+        # and escaped as a traceback with exit 1 - an undocumented third exit
+        # code for a caller that distinguishes 0 from the documented 2.
+        print(f"au-tax-change-impact-monitor: blocked: a file path could not be used: {exc}", file=sys.stderr)
         return 2
 
 

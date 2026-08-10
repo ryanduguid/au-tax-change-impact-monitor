@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -24,6 +25,14 @@ ALLOWED_DECISIONS = {
     "UPDATE_CANDIDATE",
     "ESCALATE_TECHNICAL_REVIEW",
 }
+# The one calendar-date and timestamp grammar this package accepts. ISO 8601
+# extended forms only: no basic form, no week or ordinal dates, no bare-hour
+# offset. See _parse_timestamp for why the grammar is pinned here.
+DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
+TIMESTAMP_PATTERN = re.compile(
+    r"(?P<stamp>\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)?)"
+    r"(?P<offset>Z|[+-]\d{2}:\d{2})?"
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,12 @@ def _iso_date(value: Any, *, field: str, nullable: bool = False) -> str | None:
     if value is None and nullable:
         return None
     text = _non_empty(value, field=field)
+    # Match before parsing: date.fromisoformat accepts the ISO basic form
+    # ("20990701") and week dates ("2099-W27-1") from Python 3.11 and rejects
+    # both on the declared 3.10 floor, so delegating to it alone would let the
+    # interpreter decide whether a stored artefact is valid.
+    if DATE_PATTERN.fullmatch(text) is None:
+        raise MonitorError(f"{field} must be an ISO date.")
     try:
         date.fromisoformat(text)
     except ValueError as exc:
@@ -59,15 +74,39 @@ def _iso_date(value: Any, *, field: str, nullable: bool = False) -> str | None:
     return text
 
 
-def _iso_timestamp(value: Any, *, field: str) -> str:
-    text = _non_empty(value, field=field)
-    # datetime.fromisoformat only accepts a trailing Z from Python 3.11;
-    # normalise it so the supported 3.10 floor parses the same values.
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+def _parse_timestamp(text: str, *, field: str) -> datetime:
+    """Parse the one timestamp grammar this package accepts.
+
+    datetime.fromisoformat widened its grammar in Python 3.11: the basic form
+    ("20260808T000000Z"), week dates and a bare-hour offset ("+00") all parse
+    there and raise on 3.10, which is inside this package's declared
+    requires-python range and inside its own CI matrix. Delegating to it would
+    make an artefact valid or invalid according to whichever interpreter the
+    next reviewer happens to run. Matching TIMESTAMP_PATTERN first, then
+    parsing with strptime, keeps the accepted set identical on every supported
+    version.
+    """
+    match = TIMESTAMP_PATTERN.fullmatch(text)
+    if match is None:
+        raise MonitorError(f"{field} must be an ISO 8601 timestamp.")
+    stamp = match.group("stamp")
+    offset = match.group("offset")
+    fmt = "%Y-%m-%dT%H:%M:%S" if "T" in stamp else "%Y-%m-%d"
+    if "." in stamp:
+        fmt += ".%f"
+    if offset is not None:
+        # strptime's %z takes an extended offset; Z is not one of its forms.
+        stamp += "+00:00" if offset == "Z" else offset
+        fmt += "%z"
     try:
-        parsed = datetime.fromisoformat(normalized)
+        return datetime.strptime(stamp, fmt)
     except ValueError as exc:
         raise MonitorError(f"{field} must be an ISO 8601 timestamp.") from exc
+
+
+def _iso_timestamp(value: Any, *, field: str) -> str:
+    text = _non_empty(value, field=field)
+    parsed = _parse_timestamp(text, field=field)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise MonitorError(f"{field} must include an explicit UTC offset or Z.")
     return text
@@ -342,8 +381,10 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
     if not isinstance(queue["observation"], dict) or set(queue["observation"]) != {"id", "observed_at", "complete"}:
         raise MonitorError("Impact queue observation has an invalid shape.")
     observed_at = _iso_timestamp(queue["observation"]["observed_at"], field="impact queue observed_at")
-    reviewed_value = datetime.fromisoformat(reviewed_at[:-1] + "+00:00" if reviewed_at.endswith("Z") else reviewed_at)
-    observed_value = datetime.fromisoformat(observed_at[:-1] + "+00:00" if observed_at.endswith("Z") else observed_at)
+    # Same parser as the validation above: a second fromisoformat call here
+    # would reintroduce the interpreter-dependent grammar it just removed.
+    reviewed_value = _parse_timestamp(reviewed_at, field="technical review reviewed_at")
+    observed_value = _parse_timestamp(observed_at, field="impact queue observed_at")
     try:
         review_predates_observation = reviewed_value < observed_value
     except TypeError as exc:

@@ -33,7 +33,17 @@ The sample fixtures ship inside the package, so a plain `pip install` can run th
 
 The example creates one `SUPERSEDED` source item mapped to a BAS-review question. It deliberately does not infer the legal effect of the change, update a skill, or send a notification.
 
-The output directory contains deterministic `impact-queue.json` and `impact-queue.md` files. An item is `OPEN` when it needs human technical review; it is `BLOCKED` when scope is incomplete, a lookup failed, or a current version has no published compilation.
+The output directory contains deterministic `impact-queue.json` and `impact-queue.md` files. An item is `OPEN` when it needs human technical review, carrying `change_kind` `SUPERSEDED` or `NO_LONGER_IN_FORCE`. An item is `BLOCKED` for any of five reasons, each named by its own `change_kind`:
+
+| `change_kind` | Cause |
+| --- | --- |
+| `INCOMPLETE_SCOPE` | The observation is marked incomplete, so no “unchanged” result can be relied on. |
+| `MISSING_OBSERVATION` | A baseline title was not observed at all. |
+| `LOOKUP_FAILED` | The observation records a failed lookup for that title. |
+| `CURRENT_NO_PUBLISHED_COMPILATION` | The title is current but has no published compilation to compare. |
+| `BASELINE_NOT_CURRENT` | The baseline row is itself marked `version_is_current: false`, so it is a stale index entry and cannot support a currency conclusion. |
+
+`compare` exits 0 for `REVIEW_REQUIRED` and `NO_CHANGE_DETECTED`, and 2 when the run status is `BLOCKED`. Every rejected input also exits 2 with a single `au-tax-change-impact-monitor: blocked: ...` line on stderr.
 
 ```bash
 au-tax-change-impact-monitor validate-review \

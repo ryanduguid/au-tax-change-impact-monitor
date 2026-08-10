@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from au_tax_change_impact_monitor.errors import MonitorError
-from au_tax_change_impact_monitor.monitor import _https_url, _iso_timestamp, _load_observation, compare, render_markdown, validate_review, write_queue
+from au_tax_change_impact_monitor.monitor import _https_url, _iso_date, _iso_timestamp, _load_observation, compare, render_markdown, validate_review, write_queue
 from au_tax_change_impact_monitor.util import sample_path
 
 
@@ -22,6 +22,42 @@ def _queue():
     )
 
 
+def _payload(kind: str, name: str) -> dict:
+    return json.loads(sample_path(kind, name).read_text(encoding="utf-8"))
+
+
+def _compare_fixtures(tmp_path: Path, **mutated: dict) -> dict:
+    """Run compare() over the shipped samples with any of the three replaced.
+
+    Every classification rule below needs a fixture the shipped demo does not
+    contain, so each case starts from the real samples and changes one thing.
+    """
+    defaults = {
+        "baseline": ("baseline", "sample-sources.json"),
+        "observation": ("observations", "sample-register-observation.json"),
+        "mapping": ("mappings", "sample-source-skill-map.json"),
+    }
+    paths = {}
+    for name, parts in defaults.items():
+        payload = mutated[name] if name in mutated else _payload(*parts)
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        paths[name] = path
+    return compare(baseline_path=paths["baseline"], observation_path=paths["observation"], mapping_path=paths["mapping"])
+
+
+def _only(queue: dict, change_kind: str) -> dict:
+    matches = [item for item in queue["items"] if item["change_kind"] == change_kind]
+    assert len(matches) == 1, f"expected one {change_kind} item, got {[item['change_kind'] for item in queue['items']]}"
+    return matches[0]
+
+
+def _clear_compilation(entry: dict) -> dict:
+    for field in ("observed_compilation_number", "observed_compilation_date", "observed_register_document_id"):
+        entry[field] = None
+    return entry
+
+
 def test_superseded_source_creates_an_open_exactly_mapped_review_item() -> None:
     queue = _queue()
 
@@ -33,6 +69,185 @@ def test_superseded_source_creates_an_open_exactly_mapped_review_item() -> None:
     assert item["state"] == "OPEN"
     assert item["mapping_status"] == "MAPPED"
     assert item["impact_candidates"][0]["mapping_basis"] == "exact_register_id_and_collection"
+
+
+def test_incomplete_scope_blocks_even_when_every_observed_source_is_unchanged(tmp_path: Path) -> None:
+    # The one conclusion this tool must never draw: "no change" from a scope
+    # that was never fully observed.
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["complete"] = False
+    for entry in observation["observations"]:
+        entry["state"] = "UNCHANGED"
+        _clear_compilation(entry)
+
+    queue = _compare_fixtures(tmp_path, observation=observation)
+
+    assert queue["run_status"] == "BLOCKED"
+    assert len(queue["items"]) == 1
+    item = _only(queue, "INCOMPLETE_SCOPE")
+    assert item["state"] == "BLOCKED"
+    assert item["mapping_status"] == "NOT_EVALUATED"
+
+
+def test_a_baseline_title_with_no_observation_is_blocked_not_dropped(tmp_path: Path) -> None:
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["complete"] = False
+    observation["observations"] = [entry for entry in observation["observations"] if entry["register_id"] != "F2099L00001"]
+
+    queue = _compare_fixtures(tmp_path, observation=observation)
+
+    missing = _only(queue, "MISSING_OBSERVATION")
+    assert missing["state"] == "BLOCKED"
+    assert missing["source"]["register_id"] == "F2099L00001"
+    assert missing["mapping_status"] == "NOT_EVALUATED"
+    assert queue["run_status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    ("state", "extra"),
+    [
+        ("CURRENT_NO_PUBLISHED_COMPILATION", {"current_version_start": "2099-09-01"}),
+        ("LOOKUP_FAILED", {"error_category": "register_unavailable"}),
+    ],
+)
+def test_an_unresolved_register_state_is_blocked_not_open(tmp_path: Path, state: str, extra: dict) -> None:
+    observation = _payload("observations", "sample-register-observation.json")
+    entry = _clear_compilation(observation["observations"][0])
+    entry["state"] = state
+    entry.update(extra)
+
+    queue = _compare_fixtures(tmp_path, observation=observation)
+
+    item = _only(queue, state)
+    assert item["state"] == "BLOCKED"
+    assert queue["run_status"] == "BLOCKED"
+
+
+def test_a_title_no_longer_in_force_is_open_for_human_review(tmp_path: Path) -> None:
+    observation = _payload("observations", "sample-register-observation.json")
+    entry = _clear_compilation(observation["observations"][0])
+    entry["state"] = "NO_LONGER_IN_FORCE"
+
+    queue = _compare_fixtures(tmp_path, observation=observation)
+
+    item = _only(queue, "NO_LONGER_IN_FORCE")
+    assert item["state"] == "OPEN"
+    assert item["source"]["observed_compilation"] is None
+    assert queue["run_status"] == "REVIEW_REQUIRED"
+
+
+def test_a_stale_baseline_row_blocks_even_an_unchanged_observation(tmp_path: Path) -> None:
+    # A baseline entry that is not itself the current version cannot support a
+    # currency conclusion, so the UNCHANGED short-circuit must not swallow it.
+    baseline = _payload("baseline", "sample-sources.json")
+    baseline["titles"][1]["version_is_current"] = False
+
+    queue = _compare_fixtures(tmp_path, baseline=baseline)
+
+    item = _only(queue, "BASELINE_NOT_CURRENT")
+    assert item["state"] == "BLOCKED"
+    assert item["source"]["register_id"] == "F2099L00001"
+    assert queue["run_status"] == "BLOCKED"
+
+
+def test_a_mapping_for_another_collection_does_not_map_the_source(tmp_path: Path) -> None:
+    # Mapping is by exact (register_id, collection). A register ID match alone
+    # must leave the changed source visible as UNMAPPED_SOURCE.
+    mapping = _payload("mappings", "sample-source-skill-map.json")
+    mapping["entries"][0]["collection"] = "LegislativeInstrument"
+
+    queue = _compare_fixtures(tmp_path, mapping=mapping)
+
+    item = _only(queue, "SUPERSEDED")
+    assert item["mapping_status"] == "UNMAPPED_SOURCE"
+    assert item["impact_candidates"] == []
+    assert item["state"] == "OPEN"
+
+
+def test_an_empty_map_leaves_the_changed_source_visible(tmp_path: Path) -> None:
+    mapping = _payload("mappings", "sample-source-skill-map.json")
+    mapping["entries"] = []
+
+    queue = _compare_fixtures(tmp_path, mapping=mapping)
+
+    item = _only(queue, "SUPERSEDED")
+    assert item["mapping_status"] == "UNMAPPED_SOURCE"
+    assert item["impact_candidates"] == []
+    assert queue["run_status"] == "REVIEW_REQUIRED"
+
+
+def test_an_exactly_mapped_source_carries_the_review_question(tmp_path: Path) -> None:
+    queue = _compare_fixtures(tmp_path)
+
+    item = _only(queue, "SUPERSEDED")
+    assert item["mapping_status"] == "MAPPED"
+    assert [candidate["mapping_id"] for candidate in item["impact_candidates"]] == ["map:sample-consumption-tax-to-bas"]
+    assert item["impact_candidates"][0]["skill_ref"] == "bas-preparation"
+
+
+def test_an_observation_collection_that_disagrees_with_the_baseline_is_rejected(tmp_path: Path) -> None:
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["observations"][0]["collection"] = "LegislativeInstrument"
+
+    with pytest.raises(MonitorError, match="collection does not match baseline"):
+        _compare_fixtures(tmp_path, observation=observation)
+
+
+@pytest.mark.parametrize("field", ["observed_compilation_number", "observed_compilation_date", "observed_register_document_id"])
+def test_a_superseded_observation_without_compilation_detail_is_rejected(tmp_path: Path, field: str) -> None:
+    # Without this guard the item renders as "Observed compilation: None dated None".
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["observations"][0][field] = None
+
+    with pytest.raises(MonitorError, match=field):
+        _compare_fixtures(tmp_path, observation=observation)
+
+
+def test_a_current_title_with_no_compilation_cannot_carry_a_document_id(tmp_path: Path) -> None:
+    observation = _payload("observations", "sample-register-observation.json")
+    entry = observation["observations"][0]
+    entry["state"] = "CURRENT_NO_PUBLISHED_COMPILATION"
+    entry["current_version_start"] = "2099-09-01"
+
+    with pytest.raises(MonitorError, match="null observed_register_document_id"):
+        _compare_fixtures(tmp_path, observation=observation)
+
+
+def test_a_failed_lookup_must_name_its_error_category(tmp_path: Path) -> None:
+    observation = _payload("observations", "sample-register-observation.json")
+    entry = _clear_compilation(observation["observations"][0])
+    entry["state"] = "LOOKUP_FAILED"
+
+    with pytest.raises(MonitorError, match="error_category"):
+        _compare_fixtures(tmp_path, observation=observation)
+
+
+def test_a_map_reusing_a_mapping_id_is_rejected(tmp_path: Path) -> None:
+    mapping = _payload("mappings", "sample-source-skill-map.json")
+    mapping["entries"].append(dict(mapping["entries"][0]))
+
+    with pytest.raises(MonitorError, match="duplicate mapping IDs"):
+        _compare_fixtures(tmp_path, mapping=mapping)
+
+
+def test_a_baseline_with_no_titles_is_rejected(tmp_path: Path) -> None:
+    baseline = _payload("baseline", "sample-sources.json")
+    baseline["titles"] = []
+
+    with pytest.raises(MonitorError, match="no titles"):
+        _compare_fixtures(tmp_path, baseline=baseline)
+
+
+def test_an_observation_scope_narrower_than_the_baseline_is_rejected(tmp_path: Path) -> None:
+    # Without the equality check a scope mismatch becomes a queue full of
+    # MISSING_OBSERVATION noise instead of a hard stop.
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["expected_register_ids"] = ["C2099A00001"]
+    observation["complete"] = False
+    observation["observations"] = observation["observations"][:1]
+
+    with pytest.raises(MonitorError, match="exactly match the baseline scope"):
+        _compare_fixtures(tmp_path, observation=observation)
 
 
 def test_complete_observation_rejects_missing_expected_source(tmp_path: Path) -> None:
@@ -186,6 +401,54 @@ def test_reviewed_at_accepts_utc_z_and_explicit_offsets() -> None:
 def test_timestamps_require_an_explicit_timezone(value: str) -> None:
     with pytest.raises(MonitorError, match="explicit UTC offset"):
         _iso_timestamp(value, field="reviewed_at")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "20260808T000000Z",       # ISO basic form
+        "2026-W32-6T00:00:00Z",   # week date
+        "2026-08-08T00:00:00+00",  # bare-hour offset
+        "2026-08-08X00:00:00Z",   # arbitrary date/time separator
+    ],
+)
+def test_timestamp_grammar_does_not_depend_on_the_interpreter(value: str) -> None:
+    """These parse on Python 3.11+ and raise on the declared 3.10 floor.
+
+    datetime.fromisoformat decides the answer, so without an explicit pattern
+    a queue written on one supported interpreter cannot be re-validated on
+    another - which is the whole point of a replayable provenance artefact.
+    """
+    with pytest.raises(MonitorError, match="ISO 8601 timestamp"):
+        _iso_timestamp(value, field="observed_at")
+
+
+@pytest.mark.parametrize("value", ["20990701", "2099-W27-1", "2099-182"])
+def test_iso_dates_reject_the_forms_only_newer_interpreters_accept(value: str) -> None:
+    with pytest.raises(MonitorError, match="must be an ISO date"):
+        _iso_date(value, field="compilation_date")
+
+
+@pytest.mark.parametrize("value", ["2026-08-08T00:00:00Z", "2026-08-08T00:00:00.5Z", "2026-08-08T00:00:00.123456+10:00"])
+def test_the_accepted_timestamp_forms_are_the_same_on_every_supported_version(value: str) -> None:
+    assert _iso_timestamp(value, field="observed_at") == value
+
+
+def test_validate_review_parses_both_timestamps_with_the_pinned_grammar(tmp_path: Path) -> None:
+    # A one-digit fractional second is accepted by fromisoformat on 3.11+ and
+    # rejected on 3.10, in both the queue and the decision file.
+    queue = _queue()
+    queue["observation"]["observed_at"] = "2026-08-08T00:00:00.000000Z"
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(json.dumps(queue), encoding="utf-8")
+    decision = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    decision["reviewed_at"] = "2026-08-09T00:00:00.5Z"
+    decision_path = tmp_path / "decision.json"
+    decision_path.write_text(json.dumps(decision), encoding="utf-8")
+
+    validation = validate_review(queue_path=queue_path, decision_path=decision_path)
+
+    assert validation["status"] == "DECISION_RECORDED"
 
 
 def test_partial_technical_review_remains_explicit(tmp_path: Path) -> None:
