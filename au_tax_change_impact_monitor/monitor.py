@@ -147,6 +147,8 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
         if not isinstance(item, dict) or set(item) != required:
             raise MonitorError(f"Observation item {index} has an invalid shape.")
         register_id = _non_empty(item["register_id"], field=f"observation {index} register_id")
+        if register_id not in expected_ids:
+            raise MonitorError("Observation contains a register ID outside the baseline scope.")
         if register_id in seen:
             raise MonitorError("Observation contains duplicate register IDs.")
         seen.add(register_id)
@@ -331,18 +333,46 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
     decision = load_json_exact(decision_path, {"schema_version", "run_id", "reviewer_ref", "reviewed_at", "decisions"}, label="technical review decision")
     if queue["schema_version"] != "au-tax-impact-queue.v1" or decision["schema_version"] != "au-tax-technical-review.v1":
         raise MonitorError("Queue or decision schema version is unsupported.")
+    if queue["mode"] != "synthetic":
+        raise MonitorError("Only synthetic impact queues can be validated.")
     if queue["run_id"] != decision["run_id"]:
         raise MonitorError("Technical review decision must refer to the exact queue run_id.")
     _non_empty(decision["reviewer_ref"], field="technical review reviewer_ref")
-    _iso_timestamp(decision["reviewed_at"], field="technical review reviewed_at")
+    reviewed_at = _iso_timestamp(decision["reviewed_at"], field="technical review reviewed_at")
+    if not isinstance(queue["observation"], dict) or set(queue["observation"]) != {"id", "observed_at", "complete"}:
+        raise MonitorError("Impact queue observation has an invalid shape.")
+    observed_at = _iso_timestamp(queue["observation"]["observed_at"], field="impact queue observed_at")
+    reviewed_value = datetime.fromisoformat(reviewed_at[:-1] + "+00:00" if reviewed_at.endswith("Z") else reviewed_at)
+    observed_value = datetime.fromisoformat(observed_at[:-1] + "+00:00" if observed_at.endswith("Z") else observed_at)
+    try:
+        review_predates_observation = reviewed_value < observed_value
+    except TypeError as exc:
+        raise MonitorError("Review and observation timestamps must use compatible timezone qualifiers.") from exc
+    if review_predates_observation:
+        raise MonitorError("Technical review reviewed_at cannot predate the queue observation.")
     if not isinstance(queue["items"], list):
         raise MonitorError("Impact queue items must be a list.")
     open_items: set[str] = set()
+    queue_item_ids: set[str] = set()
     for index, item in enumerate(queue["items"], start=1):
         if not isinstance(item, dict) or "item_id" not in item or "state" not in item:
             raise MonitorError(f"Impact queue item {index} has an invalid shape.")
+        item_id = _non_empty(item["item_id"], field=f"impact queue item {index} item_id")
+        if item_id in queue_item_ids:
+            raise MonitorError("Impact queue contains duplicate item IDs.")
+        queue_item_ids.add(item_id)
+        if item["state"] not in {"OPEN", "BLOCKED"}:
+            raise MonitorError(f"Impact queue item {index} has an unsupported state.")
         if item["state"] == "OPEN":
-            open_items.add(_non_empty(item["item_id"], field=f"impact queue item {index} item_id"))
+            open_items.add(item_id)
+    if any(item["state"] == "BLOCKED" for item in queue["items"]):
+        expected_run_status = "BLOCKED"
+    elif queue["items"]:
+        expected_run_status = "REVIEW_REQUIRED"
+    else:
+        expected_run_status = "NO_CHANGE_DETECTED"
+    if queue["run_status"] != expected_run_status:
+        raise MonitorError("Impact queue run_status does not match its items.")
     if not isinstance(decision["decisions"], list) or not decision["decisions"]:
         raise MonitorError("Technical review decision must include at least one decision.")
     seen: set[str] = set()

@@ -44,6 +44,19 @@ def test_complete_observation_rejects_missing_expected_source(tmp_path: Path) ->
         _load_observation(bad, {"C2099A00001", "F2099L00001"})
 
 
+def test_partial_observation_rejects_sources_outside_the_baseline(tmp_path: Path) -> None:
+    payload = json.loads(sample_path("observations", "sample-register-observation.json").read_text(encoding="utf-8"))
+    payload["complete"] = False
+    extra = dict(payload["observations"][0])
+    extra["register_id"] = "C2099A99999"
+    payload["observations"].append(extra)
+    bad = tmp_path / "out-of-scope.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="outside the baseline scope"):
+        _load_observation(bad, {"C2099A00001", "F2099L00001"})
+
+
 def test_markdown_keeps_limits_visible_and_escapes_source_text() -> None:
     queue = _queue()
     queue["items"][0]["source"]["title"] = "Demo | [not a link]"
@@ -149,6 +162,18 @@ def test_review_with_a_non_timestamp_reviewed_at_is_rejected(tmp_path: Path) -> 
         validate_review(queue_path=paths["json"], decision_path=bad)
 
 
+def test_review_cannot_predate_the_observation(tmp_path: Path) -> None:
+    queue = _queue()
+    paths = write_queue(queue, tmp_path / "queue")
+    payload = json.loads(sample_path("decisions", "sample-technical-review.json").read_text(encoding="utf-8"))
+    payload["reviewed_at"] = "2026-08-07T23:59:59Z"
+    bad = tmp_path / "decision.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="cannot predate"):
+        validate_review(queue_path=paths["json"], decision_path=bad)
+
+
 def test_reviewed_at_accepts_utc_z_and_explicit_offsets() -> None:
     # The shipped sample uses a trailing Z, which datetime.fromisoformat only
     # accepts natively from Python 3.11; the helper must normalise it on 3.10.
@@ -224,6 +249,36 @@ def test_observation_with_a_list_valued_state_is_rejected_cleanly(tmp_path: Path
 
     with pytest.raises(MonitorError, match="unsupported state"):
         _load_observation(bad, set(payload["expected_register_ids"]))
+
+
+def test_non_synthetic_queue_cannot_be_validated(tmp_path: Path) -> None:
+    queue = _queue()
+    queue["mode"] = "live"
+    bad = tmp_path / "live-queue.json"
+    bad.write_text(json.dumps(queue), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="Only synthetic impact queues"):
+        validate_review(queue_path=bad, decision_path=sample_path("decisions", "sample-technical-review.json"))
+
+
+def test_queue_with_duplicate_item_ids_is_rejected(tmp_path: Path) -> None:
+    queue = _queue()
+    queue["items"].append(dict(queue["items"][0]))
+    bad = tmp_path / "duplicate-items.json"
+    bad.write_text(json.dumps(queue), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="duplicate item IDs"):
+        validate_review(queue_path=bad, decision_path=sample_path("decisions", "sample-technical-review.json"))
+
+
+def test_queue_state_and_run_status_must_be_consistent(tmp_path: Path) -> None:
+    queue = _queue()
+    queue["run_status"] = "NO_CHANGE_DETECTED"
+    bad = tmp_path / "inconsistent-queue.json"
+    bad.write_text(json.dumps(queue), encoding="utf-8")
+
+    with pytest.raises(MonitorError, match="run_status does not match"):
+        validate_review(queue_path=bad, decision_path=sample_path("decisions", "sample-technical-review.json"))
 
 
 def test_decision_with_a_list_valued_decision_is_rejected_cleanly(tmp_path: Path) -> None:
