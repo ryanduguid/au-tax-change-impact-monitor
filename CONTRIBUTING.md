@@ -7,7 +7,7 @@ This is a review queue, not an advisor. It surfaces potential changes to Austral
 - Provenance travels with the item: source, version and retrieval detail, or the item does not enter the queue.
 - An incomplete scope stays visible as incomplete. Do not collapse an unknown into a default.
 - Map only exact source identifiers. A near-match is a reviewer's call, not the tool's.
-- No network access at runtime, and no imports that reach for one. The test suite walks the AST to enforce this — keep it passing rather than working around it.
+- No network access at runtime, and no imports that reach for one. The test suite walks the AST to enforce this. Keep it passing rather than working around it.
 
 ## Data boundary
 
