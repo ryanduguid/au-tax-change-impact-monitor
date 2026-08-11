@@ -214,3 +214,40 @@ def test_a_blocked_run_exits_2_with_the_queue_still_written(tmp_path: Path) -> N
     assert code == 2
     queue = json.loads((output / "impact-queue.json").read_text(encoding="utf-8"))
     assert queue["run_status"] == "BLOCKED"
+
+
+def test_a_second_run_after_stdout_was_abandoned_still_returns_its_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_abandon_stdout closes sys.stdout, which is permanent and process-wide.
+    A later main() in the same process then raised ValueError: I/O operation on
+    closed file out of _report, which only caught OSError, so a run whose queue
+    files were written correctly died with a traceback."""
+    monkeypatch.chdir(tmp_path)
+
+    class FailingStdout(io.StringIO):
+        """Fails once, so the first run abandons stdout and closes it.
+
+        Failing every time would keep raising OSError on the second run, which
+        _report already handled; the point here is the ValueError that a
+        *closed* stream raises afterwards.
+        """
+
+        failed = False
+
+        def write(self, text: str) -> int:
+            if not FailingStdout.failed:
+                FailingStdout.failed = True
+                raise OSError("stdout is gone")
+            return super().write(text)
+
+    monkeypatch.setattr(sys, "stdout", FailingStdout())
+    first = main(_compare_argv(tmp_path / "one"))
+
+    # stdout is now closed for the rest of the process
+    assert sys.stdout.closed
+    second = main(_compare_argv(tmp_path / "two"))
+
+    assert first == second
+    assert (tmp_path / "two" / "impact-queue.json").is_file()
+    assert (tmp_path / "two" / "impact-queue.md").is_file()
