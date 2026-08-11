@@ -877,3 +877,32 @@ def test_v01_package_has_no_network_client_import() -> None:
     )
     for forbidden in ("__import__", "import_module"):
         assert forbidden not in source
+
+
+def test_a_padded_register_id_the_loader_accepted_still_maps(tmp_path: Path) -> None:
+    """_load_observation strips the identifier for its scope, duplicate and
+    coverage checks but never wrote the stripped value back, while compare()
+    built its lookup from the raw one. An identifier the loader accepted as an
+    exact scope match therefore failed to map, and the observed state was
+    discarded in favour of a MISSING_OBSERVATION whose own artefact still
+    recorded observation.complete: true."""
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["observations"][0]["register_id"] += " "
+
+    queue = _compare_fixtures(tmp_path, observation=observation)
+
+    kinds = [item["change_kind"] for item in queue["items"]]
+    assert "MISSING_OBSERVATION" not in kinds
+
+
+def test_a_padded_collection_the_loader_accepted_does_not_raise(tmp_path: Path) -> None:
+    """_load_observation called _non_empty on the collection and discarded the
+    result, so compare() compared a padded collection against the stripped
+    baseline one and raised instead of matching."""
+    observation = _payload("observations", "sample-register-observation.json")
+    observation["observations"][0]["collection"] += " "
+
+    queue = _compare_fixtures(tmp_path, observation=observation)
+
+    kinds = [item["change_kind"] for item in queue["items"]]
+    assert "MISSING_OBSERVATION" not in kinds
