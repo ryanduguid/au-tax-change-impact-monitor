@@ -101,7 +101,13 @@ def _report(lines: list[str], code: int) -> int:
         for line in lines:
             _say(line)
         sys.stdout.flush()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError as well as OSError: _abandon_stdout closes sys.stdout, and
+        # closing is permanent and process-wide. A second main() call in the
+        # same process then hits "I/O operation on closed file", which is a
+        # ValueError, and it escaped this guard as an uncaught traceback even
+        # though both queue files had been written correctly. An already-closed
+        # stdout should degrade exactly like an unwritable one.
         _abandon_stdout(exc)
     return code
 
