@@ -212,7 +212,16 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
         if register_id in seen:
             raise MonitorError("Observation contains duplicate register IDs.")
         seen.add(register_id)
-        _non_empty(item["collection"], field=f"observation {index} collection")
+        collection = _non_empty(item["collection"], field=f"observation {index} collection")
+        # Write both cleaned values back. The scope, duplicate and coverage
+        # checks above all use the cleaned identifier, but compare() builds its
+        # lookup and its collection check straight off the item, so leaving the
+        # raw values here let an identifier this loader accepted as an exact
+        # scope match fail to map and become a MISSING_OBSERVATION instead.
+        # Mutating the parsed dict does not move any artefact ID: run_id and
+        # item_id hash the files through sha256_file, not the parsed objects.
+        item["register_id"] = register_id
+        item["collection"] = collection
         # isinstance first: an unhashable value such as a list would raise
         # TypeError from the set-membership test instead of a clean error.
         if not isinstance(item["state"], str) or item["state"] not in OBSERVATION_STATES:
