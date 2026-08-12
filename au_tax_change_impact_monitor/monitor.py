@@ -226,17 +226,37 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
         # TypeError from the set-membership test instead of a clean error.
         if not isinstance(item["state"], str) or item["state"] not in OBSERVATION_STATES:
             raise MonitorError(f"Observation {index} has an unsupported state.")
+        state = item["state"]
+        state_fields = {
+            "UNCHANGED": set(),
+            "SUPERSEDED": {
+                "observed_compilation_number",
+                "observed_compilation_date",
+                "observed_register_document_id",
+            },
+            "CURRENT_NO_PUBLISHED_COMPILATION": {"current_version_start"},
+            "NO_LONGER_IN_FORCE": set(),
+            "LOOKUP_FAILED": {"error_category"},
+        }
+        conditional_fields = (
+            "observed_register_document_id",
+            "observed_compilation_number",
+            "observed_compilation_date",
+            "current_version_start",
+            "error_category",
+        )
+        for field in conditional_fields:
+            if field not in state_fields[state] and item[field] is not None:
+                raise MonitorError(f"{state} must have a null {field}.")
         _https_url(item["evidence_url"], field=f"observation {index} evidence_url")
         _iso_timestamp(item["checked_at"], field=f"observation {index} checked_at")
-        if item["state"] == "SUPERSEDED":
+        if state == "SUPERSEDED":
             for field in ("observed_compilation_number", "observed_compilation_date", "observed_register_document_id"):
                 _non_empty(item[field], field=f"observation {index} {field}")
             _iso_date(item["observed_compilation_date"], field=f"observation {index} observed_compilation_date")
-        elif item["state"] == "CURRENT_NO_PUBLISHED_COMPILATION":
+        elif state == "CURRENT_NO_PUBLISHED_COMPILATION":
             _iso_date(item["current_version_start"], field=f"observation {index} current_version_start")
-            if item["observed_register_document_id"] is not None:
-                raise MonitorError("CURRENT_NO_PUBLISHED_COMPILATION must have a null observed_register_document_id.")
-        elif item["state"] == "LOOKUP_FAILED":
+        elif state == "LOOKUP_FAILED":
             _non_empty(item["error_category"], field=f"observation {index} error_category")
     if raw["complete"] and seen != expected_ids:
         raise MonitorError("A complete observation must cover every expected register ID exactly once.")
