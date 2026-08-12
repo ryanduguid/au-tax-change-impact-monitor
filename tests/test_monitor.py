@@ -213,6 +213,42 @@ def test_a_current_title_with_no_compilation_cannot_carry_a_document_id(tmp_path
         _compare_fixtures(tmp_path, observation=observation)
 
 
+@pytest.mark.parametrize(
+    ("state", "field", "value"),
+    [
+        ("UNCHANGED", "observed_compilation_number", "2"),
+        ("SUPERSEDED", "current_version_start", "2099-09-01"),
+        ("CURRENT_NO_PUBLISHED_COMPILATION", "error_category", "timeout"),
+        ("NO_LONGER_IN_FORCE", "observed_register_document_id", "C2099C00002"),
+        ("LOOKUP_FAILED", "current_version_start", "2099-09-01"),
+    ],
+)
+def test_observation_states_reject_contradictory_fields(
+    tmp_path: Path, state: str, field: str, value: str
+) -> None:
+    observation = _payload("observations", "sample-register-observation.json")
+    entry = _clear_compilation(observation["observations"][0])
+    entry.update(
+        state=state,
+        current_version_start=None,
+        error_category=None,
+    )
+    if state == "SUPERSEDED":
+        entry.update(
+            observed_compilation_number="2",
+            observed_compilation_date="2099-08-01",
+            observed_register_document_id="C2099C00002",
+        )
+    elif state == "CURRENT_NO_PUBLISHED_COMPILATION":
+        entry["current_version_start"] = "2099-09-01"
+    elif state == "LOOKUP_FAILED":
+        entry["error_category"] = "register_unavailable"
+    entry[field] = value
+
+    with pytest.raises(MonitorError, match=rf"{state} must have a null {field}"):
+        _compare_fixtures(tmp_path, observation=observation)
+
+
 def test_a_live_observation_cannot_be_compared(tmp_path: Path) -> None:
     """The observation-side twin of the queue-side synthetic-mode gate.
 
