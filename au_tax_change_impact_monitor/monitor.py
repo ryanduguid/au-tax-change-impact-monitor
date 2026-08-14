@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -9,7 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .errors import MonitorError
-from .util import load_json_exact, safe_markdown, sha256_file, sha256_json
+from .util import SourceSnapshot, load_json_exact, safe_markdown, sha256_json
 
 
 OBSERVATION_STATES = {
@@ -153,7 +155,9 @@ def _https_url(value: Any, *, field: str) -> str:
     return text
 
 
-def _load_baseline(path: Path) -> tuple[list[BaselineTitle], dict[str, Any]]:
+def _load_baseline(
+    path: Path | SourceSnapshot,
+) -> tuple[list[BaselineTitle], dict[str, Any]]:
     raw = load_json_exact(path, {"corpus", "retrieved", "source", "source_api", "titles"}, label="baseline source index")
     if raw["source"] != "Federal Register of Legislation" or not isinstance(raw["titles"], list):
         raise MonitorError("Baseline must be a Federal Register title index with a titles list.")
@@ -187,7 +191,9 @@ def _load_baseline(path: Path) -> tuple[list[BaselineTitle], dict[str, Any]]:
     return titles, raw
 
 
-def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
+def _load_observation(
+    path: Path | SourceSnapshot, expected_ids: set[str]
+) -> dict[str, Any]:
     raw = load_json_exact(path, {"schema_version", "mode", "observed_at", "expected_register_ids", "complete", "observations"}, label="Register observation")
     if raw["schema_version"] != "au-tax-register-observation.v1" or raw["mode"] != "synthetic":
         raise MonitorError("Only au-tax-register-observation.v1 in synthetic mode is supported.")
@@ -219,7 +225,7 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
         # raw values here let an identifier this loader accepted as an exact
         # scope match fail to map and become a MISSING_OBSERVATION instead.
         # Mutating the parsed dict does not move any artefact ID: run_id and
-        # item_id hash the files through sha256_file, not the parsed objects.
+        # item_id use the immutable source snapshot digests, not parsed objects.
         item["register_id"] = register_id
         item["collection"] = collection
         # isinstance first: an unhashable value such as a list would raise
@@ -263,7 +269,7 @@ def _load_observation(path: Path, expected_ids: set[str]) -> dict[str, Any]:
     return raw
 
 
-def _load_mapping(path: Path) -> list[dict[str, str]]:
+def _load_mapping(path: Path | SourceSnapshot) -> list[dict[str, str]]:
     raw = load_json_exact(path, {"schema_version", "mapping_version", "entries"}, label="source-to-skill map")
     if raw["schema_version"] != "au-tax-source-skill-map.v1" or not isinstance(raw["entries"], list):
         raise MonitorError("Source-to-skill map has an unsupported schema.")
@@ -291,16 +297,49 @@ def _candidate(mapping: dict[str, str]) -> dict[str, str]:
     }
 
 
+def _source_bound_item_id(
+    source_digests: dict[str, str], *, change_kind: str, identity: dict[str, str]
+) -> str:
+    return "impact:" + sha256_json(
+        {
+            "change_kind": change_kind,
+            "identity": identity,
+            "sources": source_digests,
+        }
+    )[:24]
+
+
 def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) -> dict[str, Any]:
-    titles, baseline_raw = _load_baseline(baseline_path)
+    # Each source is read once. Parsing and every provenance identifier use the
+    # same immutable bytes, so an in-flight replacement cannot make a queue
+    # describe one version while naming another version's digest.
+    baseline_source = SourceSnapshot.capture(
+        baseline_path, label="baseline source index"
+    )
+    titles, baseline_raw = _load_baseline(baseline_source)
     expected_ids = {title.register_id for title in titles}
-    observation = _load_observation(observation_path, expected_ids)
-    mappings = _load_mapping(mapping_path)
+    observation_source = SourceSnapshot.capture(
+        observation_path, label="Register observation"
+    )
+    observation = _load_observation(observation_source, expected_ids)
+    mapping_source = SourceSnapshot.capture(
+        mapping_path, label="source-to-skill map"
+    )
+    mappings = _load_mapping(mapping_source)
+    source_digests = {
+        "baseline": baseline_source.sha256,
+        "observation": observation_source.sha256,
+        "mapping": mapping_source.sha256,
+    }
     observations = {item["register_id"]: item for item in observation["observations"]}
     items: list[dict[str, Any]] = []
     if not observation["complete"]:
         items.append({
-            "item_id": "impact:scope-incomplete",
+            "item_id": _source_bound_item_id(
+                source_digests,
+                change_kind="INCOMPLETE_SCOPE",
+                identity={"scope": "observation"},
+            ),
             "state": "BLOCKED",
             "change_kind": "INCOMPLETE_SCOPE",
             "source": None,
@@ -312,7 +351,14 @@ def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) 
         observed = observations.get(title.register_id)
         if observed is None:
             items.append({
-                "item_id": "impact:" + sha256_json({"missing": title.register_id, "collection": title.collection})[:24],
+                "item_id": _source_bound_item_id(
+                    source_digests,
+                    change_kind="MISSING_OBSERVATION",
+                    identity={
+                        "register_id": title.register_id,
+                        "collection": title.collection,
+                    },
+                ),
                 "state": "BLOCKED",
                 "change_kind": "MISSING_OBSERVATION",
                 "source": {"register_id": title.register_id, "collection": title.collection, "title": title.name, "baseline_compilation": {"number": title.compilation_number, "date": title.compilation_date}, "observed_compilation": None, "evidence_url": title.register_page},
@@ -331,7 +377,19 @@ def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) 
         observed_compilation = None
         if observed["state"] == "SUPERSEDED":
             observed_compilation = {"number": observed["observed_compilation_number"], "date": observed["observed_compilation_date"], "document_id": observed["observed_register_document_id"]}
-        item_id = "impact:" + sha256_json({"baseline": sha256_file(baseline_path), "register_id": title.register_id, "state": observed["state"], "observation": sha256_file(observation_path)})[:24]
+        item_id = _source_bound_item_id(
+            source_digests,
+            change_kind=(
+                observed["state"]
+                if title.version_is_current
+                else "BASELINE_NOT_CURRENT"
+            ),
+            identity={
+                "register_id": title.register_id,
+                "collection": title.collection,
+                "observed_state": observed["state"],
+            },
+        )
         items.append({
             "item_id": item_id,
             "state": state,
@@ -358,14 +416,14 @@ def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) 
         run_status = "REVIEW_REQUIRED"
     else:
         run_status = "NO_CHANGE_DETECTED"
-    run_id = "sha256:" + sha256_json({"baseline": sha256_file(baseline_path), "observation": sha256_file(observation_path), "mapping": sha256_file(mapping_path)})
+    run_id = "sha256:" + sha256_json(source_digests)
     return {
         "schema_version": "au-tax-impact-queue.v1",
         "run_id": run_id,
         "mode": "synthetic",
         "run_status": run_status,
-        "baseline": {"id": "sha256:" + sha256_file(baseline_path), "retrieved": baseline_raw["retrieved"], "source": baseline_raw["source"]},
-        "observation": {"id": "sha256:" + sha256_file(observation_path), "observed_at": observation["observed_at"], "complete": observation["complete"]},
+        "baseline": {"id": "sha256:" + baseline_source.sha256, "retrieved": baseline_raw["retrieved"], "source": baseline_raw["source"]},
+        "observation": {"id": "sha256:" + observation_source.sha256, "observed_at": observation["observed_at"], "complete": observation["complete"]},
         "items": items,
     }
 
@@ -408,12 +466,93 @@ def render_markdown(queue: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _remove_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        # Cleanup is best effort; the caller re-raises the original failure.
+        pass
+
+
+def _restore_quietly(parked: Path, destination: Path) -> None:
+    try:
+        os.replace(parked, destination)
+    except OSError:
+        pass
+
+
+def _sibling_partial(destination: Path) -> Path:
+    """Create a unique staging file beside a queue destination."""
+    while True:
+        candidate = destination.with_name(
+            f"{destination.name}.{uuid.uuid4().hex[:12]}.partial"
+        )
+        try:
+            with candidate.open("x", encoding="utf-8"):
+                pass
+        except FileExistsError:  # pragma: no cover - a 48-bit name collision.
+            continue
+        return candidate
+
+
+def _swap_into_place(staged_path: Path, destination: Path) -> Path | None:
+    """Commit one staged file while retaining the previous file for rollback."""
+    parked: Path | None = None
+    if destination.is_file():
+        parked = _sibling_partial(destination)
+        try:
+            os.replace(destination, parked)
+        except OSError:
+            _remove_quietly(parked)
+            raise
+    try:
+        os.replace(staged_path, destination)
+    except OSError:
+        if parked is not None:
+            _restore_quietly(parked, destination)
+        raise
+    return parked
+
+
 def write_queue(queue: dict[str, Any], output_dir: Path) -> dict[str, Path]:
+    """Stage and commit the JSON/Markdown pair, restoring the old pair on failure."""
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "impact-queue.json"
     markdown_path = output_dir / "impact-queue.md"
-    json_path.write_text(json.dumps(queue, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    markdown_path.write_text(render_markdown(queue), encoding="utf-8")
+    rendered = (
+        (json_path, json.dumps(queue, indent=2, sort_keys=True) + "\n"),
+        (markdown_path, render_markdown(queue)),
+    )
+
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for destination, text in rendered:
+            staged_path = _sibling_partial(destination)
+            staged.append((staged_path, destination))
+            staged_path.write_text(text, encoding="utf-8")
+    except BaseException:
+        for staged_path, _ in staged:
+            _remove_quietly(staged_path)
+        raise
+
+    replaced: list[tuple[Path, Path | None]] = []
+    try:
+        for staged_path, destination in staged:
+            replaced.append(
+                (destination, _swap_into_place(staged_path, destination))
+            )
+    except OSError:
+        for destination, parked in reversed(replaced):
+            if parked is None:
+                _remove_quietly(destination)
+            else:
+                _restore_quietly(parked, destination)
+        for staged_path, _ in staged:
+            _remove_quietly(staged_path)
+        raise
+    for _, parked in replaced:
+        if parked is not None:
+            _remove_quietly(parked)
     return {"json": json_path, "markdown": markdown_path}
 
 

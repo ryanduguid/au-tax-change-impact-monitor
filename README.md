@@ -35,7 +35,7 @@ The sample fixtures ship inside the package, so a plain `pip install` can run th
 
 The example creates one `SUPERSEDED` source item mapped to a BAS-review question. It deliberately does not infer the legal effect of the change, update a skill, or send a notification.
 
-The output directory contains deterministic `impact-queue.json` and `impact-queue.md` files. An item is `OPEN` when it needs human technical review, carrying `change_kind` `SUPERSEDED` or `NO_LONGER_IN_FORCE`. An item is `BLOCKED` for any of five reasons, each named by its own `change_kind`:
+The output directory contains deterministic `impact-queue.json` and `impact-queue.md` files. Both are staged before publication; if committing the second file fails, the writer restores the complete previous pair rather than leaving two runs mixed together. Input digests and identifiers come from the same immutable byte snapshots that are parsed. An item is `OPEN` when it needs human technical review, carrying `change_kind` `SUPERSEDED` or `NO_LONGER_IN_FORCE`. An item is `BLOCKED` for any of five reasons, each named by its own `change_kind`:
 
 | `change_kind` | Cause |
 | --- | --- |
