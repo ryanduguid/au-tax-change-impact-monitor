@@ -20,6 +20,8 @@ sha256sum --check SHA256SUMS
 gh attestation verify au_tax_change_impact_monitor-0.1.1-py3-none-any.whl -R ryanduguid/au-tax-change-impact-monitor
 gh attestation verify au_tax_change_impact_monitor-0.1.1-py3-none-any.whl -R ryanduguid/au-tax-change-impact-monitor --predicate-type https://spdx.dev/Document/v2.3
 gh release view v0.1.1 -R ryanduguid/au-tax-change-impact-monitor --json isImmutable
+gh release verify v0.1.1 -R ryanduguid/au-tax-change-impact-monitor
+gh release verify-asset v0.1.1 au_tax_change_impact_monitor-0.1.1-py3-none-any.whl -R ryanduguid/au-tax-change-impact-monitor
 ```
 
 If any gate fails, inspect it before touching the tag or draft. Never move a published tag.
