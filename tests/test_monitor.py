@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+import au_tax_change_impact_monitor.monitor as monitor_module
 from au_tax_change_impact_monitor.errors import MonitorError
 from au_tax_change_impact_monitor.monitor import _https_url, _iso_date, _iso_timestamp, _load_observation, compare, render_markdown, validate_review, write_queue
-from au_tax_change_impact_monitor.util import sample_path
+from au_tax_change_impact_monitor.util import SourceSnapshot, sample_path, sha256_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +71,83 @@ def test_superseded_source_creates_an_open_exactly_mapped_review_item() -> None:
     assert item["state"] == "OPEN"
     assert item["mapping_status"] == "MAPPED"
     assert item["impact_candidates"][0]["mapping_basis"] == "exact_register_id_and_collection"
+
+
+def test_parsing_and_every_provenance_id_use_the_same_source_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sample_sources = {
+        "baseline": sample_path("baseline", "sample-sources.json"),
+        "observation": sample_path("observations", "sample-register-observation.json"),
+        "mapping": sample_path("mappings", "sample-source-skill-map.json"),
+    }
+    source_paths = {name: tmp_path / f"{name}.json" for name in sample_sources}
+    original_bytes = {}
+    for name, source in sample_sources.items():
+        content = source.read_bytes()
+        source_paths[name].write_bytes(content)
+        original_bytes[name] = content
+
+    replacement = b"{}\n"
+    real_text = SourceSnapshot.text
+
+    def text_then_replace(snapshot: SourceSnapshot, *, label: str) -> str:
+        text = real_text(snapshot, label=label)
+        snapshot.path.write_bytes(replacement)
+        return text
+
+    monkeypatch.setattr(SourceSnapshot, "text", text_then_replace)
+
+    queue = compare(
+        baseline_path=source_paths["baseline"],
+        observation_path=source_paths["observation"],
+        mapping_path=source_paths["mapping"],
+    )
+
+    digests = {
+        name: hashlib.sha256(content).hexdigest()
+        for name, content in original_bytes.items()
+    }
+    assert queue["run_id"] == "sha256:" + sha256_json(digests)
+    assert queue["baseline"]["id"] == "sha256:" + digests["baseline"]
+    assert queue["observation"]["id"] == "sha256:" + digests["observation"]
+    item = _only(queue, "SUPERSEDED")
+    assert item["item_id"] == "impact:" + sha256_json(
+        {
+            "change_kind": "SUPERSEDED",
+            "identity": {
+                "register_id": item["source"]["register_id"],
+                "collection": item["source"]["collection"],
+                "observed_state": "SUPERSEDED",
+            },
+            "sources": digests,
+        }
+    )[:24]
+    assert item["mapping_status"] == "MAPPED"
+    assert all(path.read_bytes() == replacement for path in source_paths.values())
+
+
+@pytest.mark.parametrize("shape", ["changed", "incomplete", "missing"])
+def test_every_item_kind_is_bound_to_all_three_source_snapshots(
+    tmp_path: Path, shape: str
+) -> None:
+    observation = _payload("observations", "sample-register-observation.json")
+    if shape in {"incomplete", "missing"}:
+        observation["complete"] = False
+    if shape == "missing":
+        observation["observations"] = observation["observations"][1:]
+
+    mapping = _payload("mappings", "sample-source-skill-map.json")
+    first = _compare_fixtures(tmp_path, observation=observation, mapping=mapping)
+    # The mapping rules are unchanged; only source metadata bytes differ. Every
+    # item ID must still move because it belongs to the exact three-file run.
+    mapping["mapping_version"] += "-same-rules-new-source"
+    second = _compare_fixtures(tmp_path, observation=observation, mapping=mapping)
+
+    first_ids = {item["change_kind"]: item["item_id"] for item in first["items"]}
+    second_ids = {item["change_kind"]: item["item_id"] for item in second["items"]}
+    assert first_ids.keys() == second_ids.keys()
+    assert all(first_ids[kind] != second_ids[kind] for kind in first_ids)
 
 
 def test_incomplete_scope_blocks_even_when_every_observed_source_is_unchanged(tmp_path: Path) -> None:
@@ -433,6 +512,49 @@ def test_queue_writes_and_human_decision_is_structurally_valid(tmp_path: Path) -
     assert validation["status"] == "DECISION_RECORDED"
     assert validation["decision_count"] == 1
     assert validation["mode"] == "synthetic"
+
+
+def test_second_queue_commit_failure_restores_the_previous_pair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "queue"
+    write_queue(_queue(), output)
+    previous = {
+        name: (output / name).read_bytes()
+        for name in ("impact-queue.json", "impact-queue.md")
+    }
+    replacement_queue = _queue()
+    replacement_queue["baseline"]["source"] = "Replacement source"
+
+    real_replace = monitor_module.os.replace
+    failed = {"value": False}
+
+    def fail_markdown_commit(source: Path, destination: Path) -> None:
+        # Let the second swap park the existing Markdown, then fail the actual
+        # staged-to-destination commit. This exercises both layers of rollback.
+        if (
+            not failed["value"]
+            and destination == output / "impact-queue.md"
+            and source.name.endswith(".partial")
+        ):
+            failed["value"] = True
+            raise OSError(5, "simulated second queue commit failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(monitor_module.os, "replace", fail_markdown_commit)
+
+    with pytest.raises(OSError, match="second queue commit failure"):
+        write_queue(replacement_queue, output)
+
+    assert failed["value"] is True
+    assert {
+        name: (output / name).read_bytes()
+        for name in ("impact-queue.json", "impact-queue.md")
+    } == previous
+    assert sorted(path.name for path in output.iterdir()) == [
+        "impact-queue.json",
+        "impact-queue.md",
+    ]
 
 
 def test_unknown_technical_decision_is_rejected(tmp_path: Path) -> None:

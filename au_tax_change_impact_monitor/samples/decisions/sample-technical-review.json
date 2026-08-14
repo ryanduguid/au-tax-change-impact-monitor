@@ -5,7 +5,7 @@
   "reviewed_at": "2026-08-08T00:00:00Z",
   "decisions": [
     {
-      "item_id": "impact:64ea8458e99ade934803959f",
+      "item_id": "impact:bbdd672a61028edb047b60ef",
       "decision": "ESCALATE_TECHNICAL_REVIEW",
       "rationale": "Synthetic fixture demonstrates a source version change that needs a technical-tax assessment.",
       "evidence_note": "Reviewed the fabricated Register metadata and direct fixture link."
