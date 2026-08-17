@@ -309,6 +309,14 @@ def _source_bound_item_id(
     )[:24]
 
 
+def _run_status_for(items: list[dict[str, Any]]) -> str:
+    if any(item["state"] == "BLOCKED" for item in items):
+        return "BLOCKED"
+    if items:
+        return "REVIEW_REQUIRED"
+    return "NO_CHANGE_DETECTED"
+
+
 def _incomplete_scope_item(source_digests: dict[str, str]) -> dict[str, Any]:
     return {
         "item_id": _source_bound_item_id(
@@ -436,12 +444,7 @@ def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) 
             )
         )
     items.sort(key=lambda item: (item["state"] != "BLOCKED", item["change_kind"], item["item_id"]))
-    if any(item["state"] == "BLOCKED" for item in items):
-        run_status = "BLOCKED"
-    elif items:
-        run_status = "REVIEW_REQUIRED"
-    else:
-        run_status = "NO_CHANGE_DETECTED"
+    run_status = _run_status_for(items)
     run_id = "sha256:" + sha256_json(source_digests)
     return {
         "schema_version": "au-tax-impact-queue.v1",
@@ -623,13 +626,8 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
             raise MonitorError(f"Impact queue item {index} has an unsupported state.")
         if item["state"] == "OPEN":
             open_items.add(item_id)
-    if any(item["state"] == "BLOCKED" for item in queue["items"]):
-        expected_run_status = "BLOCKED"
-    elif queue["items"]:
-        expected_run_status = "REVIEW_REQUIRED"
-    else:
-        expected_run_status = "NO_CHANGE_DETECTED"
-    if queue["run_status"] != expected_run_status:
+    # Recomputed on purpose: validation re-derives the writer's rule, never trusts the stored run_status.
+    if queue["run_status"] != _run_status_for(queue["items"]):
         raise MonitorError("Impact queue run_status does not match its items.")
     if not isinstance(decision["decisions"], list) or not decision["decisions"]:
         raise MonitorError("Technical review decision must include at least one decision.")
