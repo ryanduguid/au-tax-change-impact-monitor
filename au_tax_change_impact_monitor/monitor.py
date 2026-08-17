@@ -377,13 +377,12 @@ def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) 
         observed_compilation = None
         if observed["state"] == "SUPERSEDED":
             observed_compilation = {"number": observed["observed_compilation_number"], "date": observed["observed_compilation_date"], "document_id": observed["observed_register_document_id"]}
+        change_kind = (
+            observed["state"] if title.version_is_current else "BASELINE_NOT_CURRENT"
+        )
         item_id = _source_bound_item_id(
             source_digests,
-            change_kind=(
-                observed["state"]
-                if title.version_is_current
-                else "BASELINE_NOT_CURRENT"
-            ),
+            change_kind=change_kind,
             identity={
                 "register_id": title.register_id,
                 "collection": title.collection,
@@ -393,7 +392,7 @@ def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) 
         items.append({
             "item_id": item_id,
             "state": state,
-            "change_kind": observed["state"] if title.version_is_current else "BASELINE_NOT_CURRENT",
+            "change_kind": change_kind,
             "source": {
                 "register_id": title.register_id,
                 "collection": title.collection,
