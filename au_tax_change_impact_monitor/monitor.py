@@ -459,7 +459,7 @@ def render_markdown(queue: dict[str, Any]) -> str:
                 lines.append(f"- Observed compilation: {safe_markdown(observed['number'])} dated {observed['date']} (`{safe_markdown(observed['document_id'])}`)")
         lines.append(f"- Mapping status: {item['mapping_status']}")
         for candidate in item["impact_candidates"]:
-            lines.append(f"- Review candidate: `{safe_markdown(candidate['skill_ref'])}` — {safe_markdown(candidate['review_question'])}")
+            lines.append(f"- Review candidate (`{safe_markdown(candidate['skill_ref'])}`): {safe_markdown(candidate['review_question'])}")
         for limitation in item["limitations"]:
             lines.append(f"- Limitation: {safe_markdown(limitation)}")
         lines.append("")
