@@ -868,7 +868,7 @@ def test_a_blocked_item_cannot_be_signed_off(tmp_path: Path) -> None:
 
 def test_a_decision_naming_an_item_outside_the_queue_is_rejected(tmp_path: Path) -> None:
     # The other half of the same condition: an item_id the queue never carried
-    # would otherwise count toward the decided set and drive undecided_count to
+    # would otherwise count towards the decided set and drive undecided_count to
     # zero, turning PARTIAL_DECISION_RECORDED into DECISION_RECORDED.
     queue = _queue()
     paths = write_queue(queue, tmp_path / "queue")
