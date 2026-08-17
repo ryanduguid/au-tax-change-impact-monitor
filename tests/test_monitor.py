@@ -375,7 +375,8 @@ def test_a_map_reusing_a_mapping_id_is_rejected(tmp_path: Path) -> None:
 def test_an_input_that_is_not_utf8_is_blocked_not_a_traceback(tmp_path: Path) -> None:
     # A file the loader cannot decode is an ordinary condition, not a crash.
     # Without the UnicodeDecodeError clause the raw exception escapes main()
-    # and the CLI prints a traceback carrying the local path layout.
+    # and the CLI prints a traceback carrying the local path layout. The
+    # UTF-8 wording belongs to this decode failure alone.
     bad = tmp_path / "baseline.json"
     bad.write_bytes(b'{"source": "\xff\xfe not utf-8"}')
 
@@ -390,11 +391,13 @@ def test_an_input_that_is_not_utf8_is_blocked_not_a_traceback(tmp_path: Path) ->
 def test_an_input_path_that_is_a_directory_is_blocked_not_a_traceback(tmp_path: Path) -> None:
     # The OSError half of the same clause: a directory where a file belongs
     # raises IsADirectoryError on POSIX and PermissionError on Windows, and
-    # neither is FileNotFoundError, so only the OSError catch stops it.
+    # neither is FileNotFoundError, so only the OSError catch stops it. The
+    # message names the read failure and carries the OS detail; it must not
+    # borrow the UTF-8 wording, which describes a decode failure.
     bad = tmp_path / "baseline-directory"
     bad.mkdir()
 
-    with pytest.raises(MonitorError, match="could not be read as UTF-8"):
+    with pytest.raises(MonitorError, match=r"could not be read: .*\[Errno"):
         compare(
             baseline_path=bad,
             observation_path=sample_path("observations", "sample-register-observation.json"),

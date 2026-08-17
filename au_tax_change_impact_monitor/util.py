@@ -25,7 +25,7 @@ class SourceSnapshot:
         except FileNotFoundError as exc:
             raise MonitorError(f"{label} does not exist: {path}.") from exc
         except OSError as exc:
-            raise MonitorError(f"{label} could not be read as UTF-8: {path}.") from exc
+            raise MonitorError(f"{label} could not be read: {path} ({exc}).") from exc
         return cls(path=path, content=content, sha256=hashlib.sha256(content).hexdigest())
 
     def text(self, *, label: str) -> str:
