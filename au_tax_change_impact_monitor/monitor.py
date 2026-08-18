@@ -309,6 +309,94 @@ def _source_bound_item_id(
     )[:24]
 
 
+def _run_status_for(items: list[dict[str, Any]]) -> str:
+    if any(item["state"] == "BLOCKED" for item in items):
+        return "BLOCKED"
+    if items:
+        return "REVIEW_REQUIRED"
+    return "NO_CHANGE_DETECTED"
+
+
+def _incomplete_scope_item(source_digests: dict[str, str]) -> dict[str, Any]:
+    return {
+        "item_id": _source_bound_item_id(
+            source_digests,
+            change_kind="INCOMPLETE_SCOPE",
+            identity={"scope": "observation"},
+        ),
+        "state": "BLOCKED",
+        "change_kind": "INCOMPLETE_SCOPE",
+        "source": None,
+        "impact_candidates": [],
+        "mapping_status": "NOT_EVALUATED",
+        "limitations": ["The observation scope is incomplete; no unchanged result can be relied on."],
+    }
+
+
+def _missing_observation_item(
+    source_digests: dict[str, str], *, title: BaselineTitle
+) -> dict[str, Any]:
+    return {
+        "item_id": _source_bound_item_id(
+            source_digests,
+            change_kind="MISSING_OBSERVATION",
+            identity={
+                "register_id": title.register_id,
+                "collection": title.collection,
+            },
+        ),
+        "state": "BLOCKED",
+        "change_kind": "MISSING_OBSERVATION",
+        "source": {"register_id": title.register_id, "collection": title.collection, "title": title.name, "baseline_compilation": {"number": title.compilation_number, "date": title.compilation_date}, "observed_compilation": None, "evidence_url": title.register_page},
+        "impact_candidates": [],
+        "mapping_status": "NOT_EVALUATED",
+        "limitations": ["The expected source was not observed; currency cannot be assessed."],
+    }
+
+
+def _changed_item(
+    source_digests: dict[str, str],
+    *,
+    title: BaselineTitle,
+    observed: dict[str, Any],
+    state: str,
+    candidates: list[dict[str, str]],
+) -> dict[str, Any]:
+    change_kind = (
+        observed["state"] if title.version_is_current else "BASELINE_NOT_CURRENT"
+    )
+    observed_compilation = None
+    if observed["state"] == "SUPERSEDED":
+        observed_compilation = {"number": observed["observed_compilation_number"], "date": observed["observed_compilation_date"], "document_id": observed["observed_register_document_id"]}
+    return {
+        "item_id": _source_bound_item_id(
+            source_digests,
+            change_kind=change_kind,
+            identity={
+                "register_id": title.register_id,
+                "collection": title.collection,
+                "observed_state": observed["state"],
+            },
+        ),
+        "state": state,
+        "change_kind": change_kind,
+        "source": {
+            "register_id": title.register_id,
+            "collection": title.collection,
+            "title": title.name,
+            "baseline_compilation": {"number": title.compilation_number, "date": title.compilation_date},
+            "observed_compilation": observed_compilation,
+            "evidence_url": observed["evidence_url"],
+        },
+        "impact_candidates": candidates,
+        "mapping_status": "MAPPED" if candidates else "UNMAPPED_SOURCE",
+        "limitations": [
+            "A source-version state does not establish the legal effect of a change.",
+            "This item is not tax advice and does not update any workflow.",
+        ],
+    }
+
+
 def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) -> dict[str, Any]:
     # Each source is read once. Parsing and every provenance identifier use the
     # same immutable bytes, so an in-flight replacement cannot make a queue
@@ -334,38 +422,11 @@ def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) 
     observations = {item["register_id"]: item for item in observation["observations"]}
     items: list[dict[str, Any]] = []
     if not observation["complete"]:
-        items.append({
-            "item_id": _source_bound_item_id(
-                source_digests,
-                change_kind="INCOMPLETE_SCOPE",
-                identity={"scope": "observation"},
-            ),
-            "state": "BLOCKED",
-            "change_kind": "INCOMPLETE_SCOPE",
-            "source": None,
-            "impact_candidates": [],
-            "mapping_status": "NOT_EVALUATED",
-            "limitations": ["The observation scope is incomplete; no unchanged result can be relied on."],
-        })
+        items.append(_incomplete_scope_item(source_digests))
     for title in sorted(titles, key=lambda value: (value.register_id, value.collection)):
         observed = observations.get(title.register_id)
         if observed is None:
-            items.append({
-                "item_id": _source_bound_item_id(
-                    source_digests,
-                    change_kind="MISSING_OBSERVATION",
-                    identity={
-                        "register_id": title.register_id,
-                        "collection": title.collection,
-                    },
-                ),
-                "state": "BLOCKED",
-                "change_kind": "MISSING_OBSERVATION",
-                "source": {"register_id": title.register_id, "collection": title.collection, "title": title.name, "baseline_compilation": {"number": title.compilation_number, "date": title.compilation_date}, "observed_compilation": None, "evidence_url": title.register_page},
-                "impact_candidates": [],
-                "mapping_status": "NOT_EVALUATED",
-                "limitations": ["The expected source was not observed; currency cannot be assessed."],
-            })
+            items.append(_missing_observation_item(source_digests, title=title))
             continue
         if observed["collection"] != title.collection:
             raise MonitorError(f"Observation collection does not match baseline for {title.register_id}.")
@@ -373,49 +434,17 @@ def compare(*, baseline_path: Path, observation_path: Path, mapping_path: Path) 
             continue
         state = "BLOCKED" if observed["state"] in {"CURRENT_NO_PUBLISHED_COMPILATION", "LOOKUP_FAILED"} or not title.version_is_current else "OPEN"
         applicable = [_candidate(item) for item in mappings if item["register_id"] == title.register_id and item["collection"] == title.collection]
-        mapping_status = "MAPPED" if applicable else "UNMAPPED_SOURCE"
-        observed_compilation = None
-        if observed["state"] == "SUPERSEDED":
-            observed_compilation = {"number": observed["observed_compilation_number"], "date": observed["observed_compilation_date"], "document_id": observed["observed_register_document_id"]}
-        item_id = _source_bound_item_id(
-            source_digests,
-            change_kind=(
-                observed["state"]
-                if title.version_is_current
-                else "BASELINE_NOT_CURRENT"
-            ),
-            identity={
-                "register_id": title.register_id,
-                "collection": title.collection,
-                "observed_state": observed["state"],
-            },
+        items.append(
+            _changed_item(
+                source_digests,
+                title=title,
+                observed=observed,
+                state=state,
+                candidates=applicable,
+            )
         )
-        items.append({
-            "item_id": item_id,
-            "state": state,
-            "change_kind": observed["state"] if title.version_is_current else "BASELINE_NOT_CURRENT",
-            "source": {
-                "register_id": title.register_id,
-                "collection": title.collection,
-                "title": title.name,
-                "baseline_compilation": {"number": title.compilation_number, "date": title.compilation_date},
-                "observed_compilation": observed_compilation,
-                "evidence_url": observed["evidence_url"],
-            },
-            "impact_candidates": applicable,
-            "mapping_status": mapping_status,
-            "limitations": [
-                "A source-version state does not establish the legal effect of a change.",
-                "This item is not tax advice and does not update any workflow.",
-            ],
-        })
     items.sort(key=lambda item: (item["state"] != "BLOCKED", item["change_kind"], item["item_id"]))
-    if any(item["state"] == "BLOCKED" for item in items):
-        run_status = "BLOCKED"
-    elif items:
-        run_status = "REVIEW_REQUIRED"
-    else:
-        run_status = "NO_CHANGE_DETECTED"
+    run_status = _run_status_for(items)
     run_id = "sha256:" + sha256_json(source_digests)
     return {
         "schema_version": "au-tax-impact-queue.v1",
@@ -597,13 +626,8 @@ def validate_review(*, queue_path: Path, decision_path: Path) -> dict[str, Any]:
             raise MonitorError(f"Impact queue item {index} has an unsupported state.")
         if item["state"] == "OPEN":
             open_items.add(item_id)
-    if any(item["state"] == "BLOCKED" for item in queue["items"]):
-        expected_run_status = "BLOCKED"
-    elif queue["items"]:
-        expected_run_status = "REVIEW_REQUIRED"
-    else:
-        expected_run_status = "NO_CHANGE_DETECTED"
-    if queue["run_status"] != expected_run_status:
+    # Recomputed on purpose: validation re-derives the writer's rule, never trusts the stored run_status.
+    if queue["run_status"] != _run_status_for(queue["items"]):
         raise MonitorError("Impact queue run_status does not match its items.")
     if not isinstance(decision["decisions"], list) or not decision["decisions"]:
         raise MonitorError("Technical review decision must include at least one decision.")
