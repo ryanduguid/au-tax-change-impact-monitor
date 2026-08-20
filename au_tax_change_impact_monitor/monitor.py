@@ -96,15 +96,28 @@ DECISION_FIELDS = {
     "decisions",
 }
 DECISION_ENTRY_FIELDS = {"item_id", "decision", "rationale", "evidence_note"}
-CHANGE_KINDS = {
-    "INCOMPLETE_SCOPE",
-    "MISSING_OBSERVATION",
-    "SUPERSEDED",
-    "CURRENT_NO_PUBLISHED_COMPILATION",
-    "NO_LONGER_IN_FORCE",
-    "LOOKUP_FAILED",
-    "BASELINE_NOT_CURRENT",
+CHANGE_KIND_MATRIX = {
+    "INCOMPLETE_SCOPE": ("BLOCKED", frozenset({"NOT_EVALUATED"})),
+    "MISSING_OBSERVATION": ("BLOCKED", frozenset({"NOT_EVALUATED"})),
+    "SUPERSEDED": ("OPEN", frozenset({"MAPPED", "UNMAPPED_SOURCE"})),
+    "CURRENT_NO_PUBLISHED_COMPILATION": (
+        "BLOCKED",
+        frozenset({"MAPPED", "UNMAPPED_SOURCE"}),
+    ),
+    "NO_LONGER_IN_FORCE": (
+        "OPEN",
+        frozenset({"MAPPED", "UNMAPPED_SOURCE"}),
+    ),
+    "LOOKUP_FAILED": (
+        "BLOCKED",
+        frozenset({"MAPPED", "UNMAPPED_SOURCE"}),
+    ),
+    "BASELINE_NOT_CURRENT": (
+        "BLOCKED",
+        frozenset({"MAPPED", "UNMAPPED_SOURCE"}),
+    ),
 }
+CHANGE_KINDS = set(CHANGE_KIND_MATRIX)
 MAPPING_STATUSES = {"MAPPED", "UNMAPPED_SOURCE", "NOT_EVALUATED"}
 
 
@@ -785,6 +798,8 @@ def _validate_queue_evidence(queue: dict[str, Any]) -> tuple[set[str], str]:
         raise MonitorError("Impact queue items must be a list.")
     open_items: set[str] = set()
     queue_item_ids: set[str] = set()
+    incomplete_scope_count = 0
+    missing_observation_count = 0
     for index, item in enumerate(queue["items"], start=1):
         if not isinstance(item, dict) or set(item) != ITEM_FIELDS:
             raise MonitorError(f"Impact queue item {index} has an invalid shape.")
@@ -807,6 +822,11 @@ def _validate_queue_evidence(queue: dict[str, Any]) -> tuple[set[str], str]:
                 f"Impact queue item {index} has an unsupported change_kind."
             )
         change_kind = item["change_kind"]
+        expected_state, supported_mapping_statuses = CHANGE_KIND_MATRIX[change_kind]
+        if change_kind == "INCOMPLETE_SCOPE":
+            incomplete_scope_count += 1
+        elif change_kind == "MISSING_OBSERVATION":
+            missing_observation_count += 1
         _validate_source(item["source"], item_index=index, change_kind=change_kind)
         candidate_count = _validate_candidates(
             item["impact_candidates"], item_index=index
@@ -826,6 +846,14 @@ def _validate_queue_evidence(queue: dict[str, Any]) -> tuple[set[str], str]:
             raise MonitorError(
                 f"Impact queue item {index} with candidates must be MAPPED."
             )
+        if item["state"] != expected_state:
+            raise MonitorError(
+                f"Impact queue item {index} change_kind must remain {expected_state}."
+            )
+        if item["mapping_status"] not in supported_mapping_statuses:
+            raise MonitorError(
+                f"Impact queue item {index} mapping_status is unsupported for its change_kind."
+            )
         limitations = item["limitations"]
         if not isinstance(limitations, list):
             raise MonitorError(
@@ -838,25 +866,17 @@ def _validate_queue_evidence(queue: dict[str, Any]) -> tuple[set[str], str]:
                     f"impact queue item {index} limitation {limitation_index}"
                 ),
             )
-        if change_kind in {"INCOMPLETE_SCOPE", "MISSING_OBSERVATION"}:
-            if item["state"] != "BLOCKED" or item["mapping_status"] != "NOT_EVALUATED":
-                raise MonitorError(
-                    f"Impact queue item {index} has invalid blocked-scope fields."
-                )
-        if change_kind in {
-            "CURRENT_NO_PUBLISHED_COMPILATION",
-            "LOOKUP_FAILED",
-            "BASELINE_NOT_CURRENT",
-        } and item["state"] != "BLOCKED":
-            raise MonitorError(
-                f"Impact queue item {index} change_kind must remain BLOCKED."
-            )
-        if change_kind in {"SUPERSEDED", "NO_LONGER_IN_FORCE"} and item["state"] != "OPEN":
-            raise MonitorError(
-                f"Impact queue item {index} change_kind must remain OPEN."
-            )
         if item["state"] == "OPEN":
             open_items.add(item_id)
+
+    expected_incomplete_scope_count = 0 if observation["complete"] else 1
+    if (
+        incomplete_scope_count != expected_incomplete_scope_count
+        or (observation["complete"] and missing_observation_count)
+    ):
+        raise MonitorError(
+            "Impact queue observation complete is inconsistent with its scope items."
+        )
 
     # Recomputed on purpose: validation derives the writer's rule and never
     # trusts the stored summary state.
